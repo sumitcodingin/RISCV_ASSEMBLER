@@ -67,6 +67,28 @@ unordered_map<string, UJType> uj_instructions = {
 string reg_to_bin(int reg) { return bitset<5>(reg).to_string(); }
 string imm_to_bin(int imm, int bit_size) { return bitset<32>(imm).to_string().substr(32 - bit_size); }
 
+string handle_pseudo(string &instruction, string &rd, string &rs1, int &imm) {
+    if (instruction == "nop") {
+        instruction = "addi";
+        rd = "x0";
+        rs1 = "x0";
+        imm = 0;
+    } else if (instruction == "mv") {
+        instruction = "addi";
+        imm = 0;
+    } else if (instruction == "not") {
+        instruction = "xori";
+        imm = -1;
+    } else if (instruction == "neg") {
+        instruction = "sub";
+        rs1 = "x0";
+    } else if (instruction == "li") {
+        instruction = "addi";
+        rs1 = "x0";
+    }
+    return instruction;
+}
+
 // Assembler Class
 class RISCAssembler {
 public:
@@ -123,6 +145,10 @@ int main() {
             stringstream ss(line);
             string instruction;
             ss >> instruction;
+            int imm;
+            string rd, rs1;
+            
+            instruction = handle_pseudo(instruction, rd, rs1, imm);
 
             if (r_instructions.count(instruction)) {
                 string rd, rs1, rs2;
