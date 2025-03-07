@@ -7,14 +7,26 @@
 
 using namespace std;
 
-// Register Mapping
-unordered_map<string, int> reg_map = {
-    {"x0", 0}, {"x1", 1}, {"x2", 2}, {"x3", 3}, {"x4", 4}, {"x5", 5}, {"x6", 6}, {"x7", 7},
-    {"x8", 8}, {"x9", 9}, {"x10", 10}, {"x11", 11}, {"x12", 12}, {"x13", 13}, {"x14", 14}, {"x15", 15},
-    {"x16", 16}, {"x17", 17}, {"x18", 18}, {"x19", 19}, {"x20", 20}, {"x21", 21}, {"x22", 22}, {"x23", 23},
-    {"x24", 24}, {"x25", 25}, {"x26", 26}, {"x27", 27}, {"x28", 28}, {"x29", 29}, {"x30", 30}, {"x31", 31}
-};
+unordered_map<string, int> reg_map;  // Global variable
 
+void init_register_map() {
+    for (int i = 0; i < 32; ++i) {
+        reg_map["x" + to_string(i)] = i;
+    }
+
+    // ABI Register Names
+    reg_map["zero"] = 0; reg_map["ra"] = 1; reg_map["sp"] = 2;
+    reg_map["gp"] = 3; reg_map["tp"] = 4; reg_map["t0"] = 5;
+    reg_map["t1"] = 6; reg_map["t2"] = 7; reg_map["s0"] = 8; reg_map["fp"] = 8;
+    reg_map["s1"] = 9; reg_map["a0"] = 10; reg_map["a1"] = 11;
+    reg_map["a2"] = 12; reg_map["a3"] = 13; reg_map["a4"] = 14;
+    reg_map["a5"] = 15; reg_map["a6"] = 16; reg_map["a7"] = 17;
+    reg_map["s2"] = 18; reg_map["s3"] = 19; reg_map["s4"] = 20;
+    reg_map["s5"] = 21; reg_map["s6"] = 22; reg_map["s7"] = 23;
+    reg_map["s8"] = 24; reg_map["s9"] = 25; reg_map["s10"] = 26;
+    reg_map["s11"] = 27; reg_map["t3"] = 28; reg_map["t4"] = 29;
+    reg_map["t5"] = 30; reg_map["t6"] = 31;
+}
 // Instruction Structures
 struct RType { int opcode, funct3, funct7; };
 struct IType { int opcode, funct3; };
@@ -26,11 +38,13 @@ struct UJType { int opcode; };
 // Instruction Sets
 unordered_map<string, RType> r_instructions = {
     {"add", {0x33, 0x0, 0x0}}, {"sub", {0x33, 0x0, 0x20}}, {"and", {0x33, 0x7, 0x0}}, {"or", {0x33, 0x6, 0x0}},
-    {"sll", {0x33, 0x1, 0x0}}, {"slt", {0x33, 0x2, 0x0}}, {"sra", {0x33, 0x5, 0x20}}, {"srl", {0x33, 0x5, 0x0}}
+    {"sll", {0x33, 0x1, 0x0}}, {"slt", {0x33, 0x2, 0x0}}, {"sra", {0x33, 0x5, 0x20}}, {"srl", {0x33, 0x5, 0x0}}, 
+    {"mul", {0x33, 0x0, 0x01}}, {"div", {0x33, 0x4, 0x01}},{"rem", {0x33, 0x6, 0x01}},{"xor", {0x33, 0x4, 0x00}},{"slt", {0x33, 0x2, 0x0}}
 };
 
 unordered_map<string, IType> i_instructions = {
-    {"addi", {0x13, 0x0}}, {"andi", {0x13, 0x7}}, {"ori", {0x13, 0x6}}, {"lb", {0x03, 0x0}}, {"jalr", {0x67, 0x0}}
+    {"addi", {0x13, 0x0}}, {"andi", {0x13, 0x7}}, {"ori", {0x13, 0x6}}, {"lb", {0x03, 0x0}}, {"jalr", {0x67, 0x0}},{"lh", {0x03, 0x1}}, {"lw", {0x03, 0x2}},
+    {"slti", {0x13, 0x2}}
 };
 
 unordered_map<string, SType> s_instructions = {
