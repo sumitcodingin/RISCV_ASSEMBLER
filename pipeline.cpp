@@ -98,90 +98,84 @@ struct MEM_WB_Register {
     int instr_number = 0;   // For tracking instruction number
 };
 
+string to_hex(uint32_t val) {
+    stringstream ss;
+    ss << "0x" << setfill('0') << setw(8) << hex << uppercase << val;
+    return ss.str();
+}
 // Branch Predictor
 class BranchPredictor {
-private:
-    // 2-bit saturating counter states
-    enum PredictorState { STRONGLY_NOT_TAKEN = 0, WEAKLY_NOT_TAKEN = 1, WEAKLY_TAKEN = 2, STRONGLY_TAKEN = 3 };
-    static const int PHT_SIZE = 1024;  // Pattern History Table size
-    static const int BTB_SIZE = 64;    // Branch Target Buffer size
+    private:
+        static const int PHT_SIZE = 1024;  // Pattern History Table size
+        static const int BTB_SIZE = 64;    // Branch Target Buffer size
+        
+        struct BTBEntry {
+            uint32_t pc;
+            uint32_t target;
+            bool valid;
+        };
+        
+        array<bool, PHT_SIZE> PHT;  // Pattern History Table (1-bit predictor)
+        array<BTBEntry, BTB_SIZE> BTB;  // Branch Target Buffer
     
-    struct BTBEntry {
-        uint32_t pc;
-        uint32_t target;
-        bool valid;
+    public:
+        BranchPredictor() {
+            // Initialize predictor to not taken (false)
+            for (int i = 0; i < PHT_SIZE; i++) {
+                PHT[i] = false;
+            }
+            
+            // Initialize BTB entries
+            for (int i = 0; i < BTB_SIZE; i++) {
+                BTB[i].valid = false;
+                BTB[i].pc = 0;
+                BTB[i].target = 0;
+            }
+        }
+        
+        bool predict(uint32_t pc) {
+            int index = (pc >> 2) & (PHT_SIZE - 1);  // Hash PC to PHT index
+            return PHT[index];  // Return true (taken) or false (not taken)
+        }
+        
+        uint32_t get_target(uint32_t pc) {
+            int index = pc % BTB_SIZE;
+            if (BTB[index].valid && BTB[index].pc == pc) {
+                return BTB[index].target;
+            }
+            return pc + 4;  // Default prediction (not taken)
+        }
+        
+        void update(uint32_t pc, bool taken, uint32_t actual_target) {
+            int pht_index = (pc >> 2) & (PHT_SIZE - 1);
+            
+            // Update PHT with actual outcome
+            PHT[pht_index] = taken;
+            
+            // Update BTB with actual target
+            int btb_index = pc % BTB_SIZE;
+            BTB[btb_index].pc = pc;
+            BTB[btb_index].target = actual_target;
+            BTB[btb_index].valid = true;
+        }
+        
+        void print_state() {
+            cout << "Branch Predictor State:" << endl;
+            cout << "PHT (first 8 entries): ";
+            for (int i = 0; i < 8; i++) {
+                cout << (PHT[i] ? 1 : 0) << " ";
+            }
+            cout << endl;
+            
+            cout << "BTB (active entries):" << endl;
+            for (int i = 0; i < BTB_SIZE; i++) {
+                if (BTB[i].valid) {
+                    cout << "  Index " << i << ": PC=" << to_hex(BTB[i].pc) 
+                         << ", Target=" << to_hex(BTB[i].target) << endl;
+                }
+            }
+        }
     };
-    
-    array<PredictorState, PHT_SIZE> PHT;  // Pattern History Table
-    array<BTBEntry, BTB_SIZE> BTB;        // Branch Target Buffer
-
-public:
-    BranchPredictor() {
-        // Initialize predictor to weakly not taken
-        for (int i = 0; i < PHT_SIZE; i++) {
-            PHT[i] = WEAKLY_NOT_TAKEN;
-        }
-        
-        // Initialize BTB entries
-        for (int i = 0; i < BTB_SIZE; i++) {
-            BTB[i].valid = false;
-            BTB[i].pc = 0;
-            BTB[i].target = 0;
-        }
-    }
-    
-    bool predict(uint32_t pc) {
-        int index = (pc >> 2) & (PHT_SIZE - 1);  // Hash PC to PHT index
-        return PHT[index] >= WEAKLY_TAKEN;      // Predict taken if state is 2 or 3
-    }
-    
-    uint32_t get_target(uint32_t pc) {
-        int index = pc % BTB_SIZE;
-        if (BTB[index].valid && BTB[index].pc == pc) {
-            return BTB[index].target;
-        }
-        return pc + 4;  // Default prediction (not taken)
-    }
-    
-    void update(uint32_t pc, bool taken, uint32_t actual_target) {
-        int pht_index = (pc >> 2) & (PHT_SIZE - 1);
-        
-        // Update PHT based on actual outcome
-        if (taken) {
-            if (PHT[pht_index] < STRONGLY_TAKEN) {
-                PHT[pht_index] = static_cast<PredictorState>(PHT[pht_index] + 1);
-            }
-        } else {
-            if (PHT[pht_index] > STRONGLY_NOT_TAKEN) {
-                PHT[pht_index] = static_cast<PredictorState>(PHT[pht_index] - 1);
-            }
-        }
-        
-        // Update BTB with actual target
-        int btb_index = pc % BTB_SIZE;
-        BTB[btb_index].pc = pc;
-        BTB[btb_index].target = actual_target;
-        BTB[btb_index].valid = true;
-    }
-    
-    void print_state() {
-        cout << "Branch Predictor State:" << endl;
-        cout << "PHT (first 8 entries): ";
-        for (int i = 0; i < 8; i++) {
-            cout << PHT[i] << " ";
-        }
-        cout << endl;
-        
-        cout << "BTB (active entries):" << endl;
-        for (int i = 0; i < BTB_SIZE; i++) {
-            if (BTB[i].valid) {
-                cout << "  Index " << i << ": PC=" << to_hex(BTB[i].pc) 
-                     << ", Target=" << to_hex(BTB[i].target) << endl;
-            }
-        }
-    }
-};
-
 // Global simulation state
 uint32_t pc = 0;                         // Program Counter
 array<int32_t, 32> reg_file = {0};       // Register File (x0-x31)
@@ -206,11 +200,7 @@ uint32_t branch_target = 0;
 BranchPredictor branch_predictor;
 
 // Convert uint32_t to hex string
-string to_hex(uint32_t val) {
-    stringstream ss;
-    ss << "0x" << setfill('0') << setw(8) << hex << uppercase << val;
-    return ss.str();
-}
+
 
 // Check if a hex string is valid
 bool is_valid_hex(const string& str) {
@@ -1344,63 +1334,6 @@ void run_simulation() {
     // Final stats
     print_statistics();
 }
-
-// Branch Predictor implementation
-class BranchPredictor {
-private:
-    // Simple 2-bit saturating counter branch predictor
-    struct BranchInfo {
-        uint8_t counter;       // 2-bit counter: 0-1 predict not taken, 2-3 predict taken
-        uint32_t target;       // Branch target address
-    };
-    
-    unordered_map<uint32_t, BranchInfo> branch_table;
-
-public:
-    BranchPredictor() {}
-    
-    // Predict whether branch will be taken
-    bool predict(uint32_t branch_pc) {
-        if (branch_table.find(branch_pc) == branch_table.end()) {
-            // First encounter: Default predict not taken
-            return false;
-        }
-        
-        return branch_table[branch_pc].counter >= 2;
-    }
-    
-    // Get the predicted target
-    uint32_t get_target(uint32_t branch_pc) {
-        if (branch_table.find(branch_pc) == branch_table.end()) {
-            return branch_pc + 4;  // Default next PC
-        }
-        
-        return branch_table[branch_pc].target;
-    }
-    
-    // Update predictor based on actual outcome
-    void update(uint32_t branch_pc, bool taken, uint32_t target) {
-        if (branch_table.find(branch_pc) == branch_table.end()) {
-            // First time seeing this branch
-            branch_table[branch_pc] = {static_cast<unsigned char>(taken ? 2U : 0U), target};
-        } else {
-            // Update counter using 2-bit saturation
-            if (taken) {
-                if (branch_table[branch_pc].counter < 3) {
-                    branch_table[branch_pc].counter++;
-                }
-            } else {
-                if (branch_table[branch_pc].counter > 0) {
-                    branch_table[branch_pc].counter--;
-                }
-            }
-            
-            // Update target
-            branch_table[branch_pc].target = target;
-        }
-    }
-};
-
 // Initialize the simulator
 void initialize_simulator() {
     // Clear memory
@@ -1465,12 +1398,6 @@ bool load_memory(const string& text_file, const string& data_file) {
     return true;
 }
 
-// Utility function to convert to hex string
-string to_hex(uint32_t value) {
-    stringstream ss;
-    ss << "0x" << hex << setw(8) << setfill('0') << value;
-    return ss.str();
-}
 
 // Main function
 int main(int argc, char* argv[]) {
