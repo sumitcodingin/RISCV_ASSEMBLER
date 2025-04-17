@@ -8,17 +8,18 @@ This project implements a simple assembler for a subset of the RISC-V 32-bit Ins
 ### SUMIT SHARMA
 
 *Entry No:* 2023CSB1165
- SUMIT is Responsible for overall project management and integration of various components.
+ SUMIT is Specializes in software development with expertise in C++. Worked on instruction set architecture and ensuring accurate translation of assembly instructions into machine code.
+  
+
+  
+
 
 ### Ayush Sonika
 
 *Entry No:* 2023CSB1107
-AYUSH is Specializes in software development with expertise in C++. Focused on implementing parsing and code generation modules.
+AYUSH is  Responsible for overall project management and integration of various components.and Focused on implementing parsing and code generation modules.
 
-### Brajesh Khokad
 
-*Entry No:* 2023CSB1111
-BRAJESH is Expert in assembly languages and compiler design. Worked on instruction set architecture and ensuring accurate translation of assembly instructions into machine code.
 
 
 ---
