@@ -13,34 +13,44 @@
 #include "Instructions_Func.h"
 #include "Auxiliary_Functions.h"
 
+// Function to sign-extend a value
+int32_t sign_extend(uint32_t value, int bits) {
+    int32_t mask = 1 << (bits - 1);
+    return (value ^ mask) - mask;
+}
+
 using namespace std;
+string to_hex(uint32_t val) {
+    stringstream ss;
+    ss << "0x" << setfill('0') << setw(8) << hex << uppercase << val;
+    return ss.str();
+}
 
 // Configuration knobs
 struct Knobs {
-    bool enable_pipelining = true;          // Knob1: Enable/disable pipelining
-    bool enable_data_forwarding = true;     // Knob2: Enable/disable data forwarding
-    bool print_reg_file = false;            // Knob3: Print register file after each cycle
-    bool print_pipeline_regs = false;       // Knob4: Print pipeline registers after each cycle
-    int trace_instruction = -1;             // Knob5: Trace specific instruction (-1 means disabled)
-    bool print_branch_predictor = false;    // Knob6: Print branch predictor details after each cycle
-    bool enable_verbose = false;          // Knob7: Enable/disable verbose output
+    bool enable_pipelining = true;
+    bool enable_data_forwarding = true;
+    bool print_reg_file = false;
+    bool print_pipeline_regs = false;
+    int trace_instruction = -1;
+    bool print_branch_predictor = false;
 } knobs;
 
 // Statistics
 struct Stats {
-    int total_cycles = 0;                  // Stat1: Total number of cycles
-    int total_instructions = 0;            // Stat2: Total instructions executed
-    int data_transfer_instructions = 0;    // Stat4: Load/store instructions
-    int alu_instructions = 0;              // Stat5: ALU instructions
-    int control_instructions = 0;          // Stat6: Control instructions
-    int stall_count = 0;                   // Stat7: Number of stalls/bubbles
-    int data_hazards = 0;                  // Stat8: Number of data hazards
-    int control_hazards = 0;               // Stat9: Number of control hazards
-    int branch_mispredictions = 0;         // Stat10: Number of branch mispredictions
-    int stalls_data_hazards = 0;           // Stat11: Stalls due to data hazards
-    int stalls_control_hazards = 0;        // Stat12: Stalls due to control hazards
+    int total_cycles = 0;
+    int total_instructions = 0;
+    int data_transfer_instructions = 0;
+    int alu_instructions = 0;
+    int control_instructions = 0;
+    int stall_count = 0;
+    int data_hazards = 0;
+    int control_hazards = 0;
+    int branch_mispredictions = 0;
+    int stalls_data_hazards = 0;
+    int stalls_control_hazards = 0;
 
-    double get_cpi() const {  // Stat3: CPI
+    double get_cpi() const {
         return total_instructions > 0 ? static_cast<double>(total_cycles) / total_instructions : 0;
     }
 } stats;
@@ -63,11 +73,12 @@ struct IF_ID_Register {
     uint32_t pc = 0;
     uint32_t ir = 0;
     bool is_valid = false;
-    int instr_number = 0;   // For tracking instruction number
+    int instr_number = 0;
 };
 
 struct ID_EX_Register {
     uint32_t pc = 0;
+    uint32_t ir = 0;
     int32_t reg_a_val = 0;
     int32_t reg_b_val = 0;
     int32_t imm = 0;
@@ -76,17 +87,17 @@ struct ID_EX_Register {
     uint32_t rd = 0;
     Control ctrl;
     bool is_valid = false;
-    int instr_number = 0;   // For tracking instruction number
+    int instr_number = 0;
 };
 
 struct EX_MEM_Register {
     uint32_t pc = 0;
     int32_t alu_result = 0;
-    int32_t rs2_val = 0;    // For store instructions
+    int32_t rs2_val = 0;
     uint32_t rd = 0;
     Control ctrl;
     bool is_valid = false;
-    int instr_number = 0;   // For tracking instruction number
+    int instr_number = 0;
 };
 
 struct MEM_WB_Register {
@@ -95,95 +106,17 @@ struct MEM_WB_Register {
     uint32_t rd = 0;
     Control ctrl;
     bool is_valid = false;
-    int instr_number = 0;   // For tracking instruction number
+    int instr_number = 0;
 };
 
-string to_hex(uint32_t val) {
-    stringstream ss;
-    ss << "0x" << setfill('0') << setw(8) << hex << uppercase << val;
-    return ss.str();
-}
-// Branch Predictor
-class BranchPredictor {
-    private:
-        static const int PHT_SIZE = 1024;  // Pattern History Table size
-        static const int BTB_SIZE = 64;    // Branch Target Buffer size
-        
-        struct BTBEntry {
-            uint32_t pc;
-            uint32_t target;
-            bool valid;
-        };
-        
-        array<bool, PHT_SIZE> PHT;  // Pattern History Table (1-bit predictor)
-        array<BTBEntry, BTB_SIZE> BTB;  // Branch Target Buffer
-    
-    public:
-        BranchPredictor() {
-            // Initialize predictor to not taken (false)
-            for (int i = 0; i < PHT_SIZE; i++) {
-                PHT[i] = false;
-            }
-            
-            // Initialize BTB entries
-            for (int i = 0; i < BTB_SIZE; i++) {
-                BTB[i].valid = false;
-                BTB[i].pc = 0;
-                BTB[i].target = 0;
-            }
-        }
-        
-        bool predict(uint32_t pc) {
-            int index = (pc >> 2) & (PHT_SIZE - 1);  // Hash PC to PHT index
-            return PHT[index];  // Return true (taken) or false (not taken)
-        }
-        
-        uint32_t get_target(uint32_t pc) {
-            int index = pc % BTB_SIZE;
-            if (BTB[index].valid && BTB[index].pc == pc) {
-                return BTB[index].target;
-            }
-            return pc + 4;  // Default prediction (not taken)
-        }
-        
-        void update(uint32_t pc, bool taken, uint32_t actual_target) {
-            int pht_index = (pc >> 2) & (PHT_SIZE - 1);
-            
-            // Update PHT with actual outcome
-            PHT[pht_index] = taken;
-            
-            // Update BTB with actual target
-            int btb_index = pc % BTB_SIZE;
-            BTB[btb_index].pc = pc;
-            BTB[btb_index].target = actual_target;
-            BTB[btb_index].valid = true;
-        }
-        
-        void print_state() {
-            cout << "Branch Predictor State:" << endl;
-            cout << "PHT (first 8 entries): ";
-            for (int i = 0; i < 8; i++) {
-                cout << (PHT[i] ? 1 : 0) << " ";
-            }
-            cout << endl;
-            
-            cout << "BTB (active entries):" << endl;
-            for (int i = 0; i < BTB_SIZE; i++) {
-                if (BTB[i].valid) {
-                    cout << "  Index " << i << ": PC=" << to_hex(BTB[i].pc) 
-                         << ", Target=" << to_hex(BTB[i].target) << endl;
-                }
-            }
-        }
-    };
 // Global simulation state
-uint32_t pc = 0;                         // Program Counter
-array<int32_t, 32> reg_file = {0};       // Register File (x0-x31)
-vector<pair<uint32_t, uint32_t>> text_memory;  // Instruction memory (address, instruction)
-vector<pair<uint32_t, int32_t>> data_memory;   // Data memory (address, value)
-const int MAX_CYCLES = 10000;            // Max cycles to prevent infinite loop
-int instruction_count = 0;               // Count instructions fetched for unique ID
-bool program_done = false;               // Flag to indicate program completion
+uint32_t pc = 0;
+array<int32_t, 32> reg_file = {0};
+vector<pair<uint32_t, uint32_t>> text_memory;
+vector<pair<uint32_t, int32_t>> data_memory;
+const int MAX_CYCLES = 10000;
+int instruction_count = 0;
+bool program_done = false;
 
 // Pipeline registers
 IF_ID_Register if_id;
@@ -193,16 +126,68 @@ MEM_WB_Register mem_wb;
 
 // Hazard/stall controls
 bool stall_pipeline = false;
-bool flush_pipeline = false;
-uint32_t branch_target = 0;
 
-// Branch predictor
-BranchPredictor branch_predictor;
+class BranchPredictor {
+    private:
+        struct BTBEntry {
+            uint32_t pc;
+            uint32_t target;
+            bool valid;
+            bool prediction; // 1-bit predictor: 0 (not taken), 1 (taken)
+        };
+        vector<BTBEntry> btb;
+        uint32_t btb_size;
+    
+    public:
+        BranchPredictor(uint32_t btb_s) : btb_size(btb_s) {
+            btb.resize(btb_size, {0, 0, false, false}); // Initialize: invalid, predict not taken
+        }
+    
+        bool predict(uint32_t pc) {
+            uint32_t index = (pc >> 2) % btb_size;
+            if (btb[index].valid && btb[index].pc == pc) {
+                bool predicted_taken = btb[index].prediction;
+                cout << "Predict: PC=" << to_hex(pc) << ", BTB hit, Prediction=" << predicted_taken << "\n";
+                return predicted_taken;
+            }
+            cout << "Predict: PC=" << to_hex(pc) << ", No BTB entry, predict not taken\n";
+            return false; // Default: predict not taken
+        }
+    
+        uint32_t get_target(uint32_t pc) {
+            uint32_t index = (pc >> 2) % btb_size;
+            if (btb[index].valid && btb[index].pc == pc) {
+                return btb[index].target;
+            }
+            return pc + 4; // Default: next instruction
+        }
+    
+        void update(uint32_t pc, bool taken, uint32_t target) {
+            uint32_t index = (pc >> 2) % btb_size;
+            // Store all control instructions in BTB
+            btb[index].pc = pc;
+            btb[index].target = target;
+            btb[index].valid = true;
+            btb[index].prediction = taken; // 1-bit predictor: set to actual outcome
+            cout << "BTB Update: PC=" << to_hex(pc) << ", Taken=" << taken 
+                 << ", Target=" << to_hex(target) << ", Prediction=" << btb[index].prediction << "\n";
+        }
+    
+        void print_state() {
+            if (!knobs.print_branch_predictor) return;
+            cout << "Branch Predictor State:\n";
+            for (uint32_t i = 0; i < btb_size; i++) {
+                if (btb[i].valid) {
+                    cout << "BTB[" << i << "]: PC=" << to_hex(btb[i].pc) 
+                         << ", Target=" << to_hex(btb[i].target) 
+                         << ", Prediction=" << btb[i].prediction << "\n";
+                }
+            }
+        }
+    };
+// Global branch predictor instance
+BranchPredictor* branch_predictor = nullptr;
 
-// Convert uint32_t to hex string
-
-
-// Check if a hex string is valid
 bool is_valid_hex(const string& str) {
     if (str.empty() || str.length() < 3 || str.substr(0, 2) != "0x") return false;
     for (size_t i = 2; i < str.length(); ++i) {
@@ -211,54 +196,18 @@ bool is_valid_hex(const string& str) {
     return true;
 }
 
-// Initialize simulation
-void init_sim() {
-    // Clear register file
-    reg_file.fill(0);
-    reg_file[2] = 0x7FFFFFE4; // Stack pointer
-    reg_file[3] = 0x10000000; // Link register
-    reg_file[10] = 0x00000001;
-    reg_file[11] = 0x07FFFFE4;
-
-    // Clear memory structures
-    text_memory.clear();
-    data_memory.clear();
-
-    // Reset program counter and instruction register
-    pc = 0;
-
-    // Reset pipeline registers
-    if_id = IF_ID_Register();
-    id_ex = ID_EX_Register();
-    ex_mem = EX_MEM_Register();
-    mem_wb = MEM_WB_Register();
-
-    // Reset hazard controls
-    stall_pipeline = false;
-    flush_pipeline = false;
-    branch_target = 0;
-
-    // Reset stats
-    stats = Stats();
-    
-    // Reset instruction counter
-    instruction_count = 0;
-    
-    // Reset program done flag
-    program_done = false;
-}
-
-// Load text.mc file
-bool load_mc_file(const string& filename) {
-    ifstream file(filename);
-    if (!file.is_open()) {
-        cout << "Error: Cannot open " << filename << endl;
+bool load_memory(const string& text_file, const string& data_file) {
+    // Load text segment
+    ifstream text_in(text_file);
+    if (!text_in) {
+        cerr << "Error: Cannot open text file: " << text_file << endl;
         return false;
     }
 
     string line;
     int line_num = 0;
-    while (getline(file, line)) {
+    int valid_lines = 0;
+    while (getline(text_in, line)) {
         ++line_num;
         size_t comment_pos = line.find('#');
         if (comment_pos != string::npos) {
@@ -271,12 +220,13 @@ bool load_mc_file(const string& filename) {
         stringstream ss(line);
         string addr_str, instr_str;
         if (!(ss >> addr_str >> instr_str)) {
-            cout << "Warning: Skipping malformed line " << line_num << ": " << line << endl;
+            cout << "Warning: Skipping malformed line " << line_num << " in " << text_file << ": " << line << endl;
             continue;
         }
 
         if (!is_valid_hex(addr_str) || !is_valid_hex(instr_str)) {
-            cout << "Warning: Skipping invalid hex at line " << line_num << ": " << addr_str << " " << instr_str << endl;
+            cout << "Warning: Invalid hex at line " << line_num << " in " << text_file
+                 << ": " << addr_str << " " << instr_str << endl;
             continue;
         }
 
@@ -284,77 +234,72 @@ bool load_mc_file(const string& filename) {
             uint32_t addr = stoul(addr_str, nullptr, 16);
             uint32_t instr = stoul(instr_str, nullptr, 16);
             text_memory.emplace_back(addr, instr);
-            cout << "Loaded instruction: " << to_hex(addr) << " -> " << to_hex(instr) << endl;
-        } catch (const std::invalid_argument& e) {
-            cout << "Warning: Invalid number format at line " << line_num << ": " << addr_str << " " << instr_str << endl;
-            continue;
-        } catch (const std::out_of_range& e) {
-            cout << "Warning: Number out of range at line " << line_num << ": " << addr_str << " " << instr_str << endl;
+            ++valid_lines;
+            cout << "Loaded text: Addr=" << to_hex(addr) << ", Instr=" << to_hex(instr) << "\n";
+        } catch (const exception& e) {
+            cout << "Warning: Invalid number format at line " << line_num << " in " << text_file
+                 << ": " << addr_str << " " << instr_str << endl;
             continue;
         }
     }
-    file.close();
+    text_in.close();
 
-    if (text_memory.empty()) {
-        cout << "Error: No valid instructions loaded from " << filename << endl;
+    if (valid_lines == 0) {
+        cerr << "Error: No valid instructions loaded from " << text_file << endl;
         return false;
     }
-    return true;
-}
+    cout << "Total valid text instructions loaded: " << valid_lines << "\n";
 
-// Load data.mc file
-bool load_data_mc(const string& filename) {
-    ifstream file(filename);
-    if (!file.is_open()) {
-        cout << "Error: Cannot open " << filename << endl;
-        return false;
+    // Load data segment if provided
+    ifstream data_in(data_file);
+    if (data_in) {
+        line_num = 0;
+        valid_lines = 0;
+        while (getline(data_in, line)) {
+            ++line_num;
+            size_t comment_pos = line.find('#');
+            if (comment_pos != string::npos) {
+                line = line.substr(0, comment_pos);
+            }
+            line.erase(0, line.find_first_not_of(" \t"));
+            line.erase(line.find_last_not_of(" \t") + 1);
+            if (line.empty()) continue;
+
+            stringstream ss(line);
+            string addr_str, value_str;
+            if (!(ss >> addr_str >> value_str)) {
+                cout << "Warning: Skipping malformed line " << line_num << " in " << data_file
+                     << ": " << line << endl;
+                continue;
+            }
+
+            if (!is_valid_hex(addr_str) || !is_valid_hex(value_str)) {
+                cout << "Warning: Invalid hex at line " << line_num << " in " << data_file
+                     << ": " << addr_str << " " << value_str << endl;
+                continue;
+            }
+
+            try {
+                uint32_t addr = stoul(addr_str, nullptr, 16);
+                int32_t value = static_cast<int32_t>(stoul(value_str, nullptr, 16));
+                data_memory.emplace_back(addr, value);
+                ++valid_lines;
+                cout << "Loaded data: Addr=" << to_hex(addr) << ", Value=" << to_hex(value) << "\n";
+            } catch (const exception& e) {
+                cout << "Warning: Invalid number format at line " << line_num << " in " << data_file
+                     << ": " << addr_str << " " << value_str << endl;
+                continue;
+            }
+        }
+        data_in.close();
+        cout << "Total valid data entries loaded: " << valid_lines << "\n";
+    } else {
+        cout << "No data file found or could not open: " << data_file << endl;
     }
-
-    string line;
-    int line_num = 0;
-    while (getline(file, line)) {
-        ++line_num;
-        size_t comment_pos = line.find('#');
-        if (comment_pos != string::npos) {
-            line = line.substr(0, comment_pos);
-        }
-        line.erase(0, line.find_first_not_of(" \t"));
-        line.erase(line.find_last_not_of(" \t") + 1);
-        if (line.empty()) continue;
-
-        stringstream ss(line);
-        string addr_str, value_str;
-        if (!(ss >> addr_str >> value_str)) {
-            cout << "Warning: Skipping malformed line " << line_num << ": " << line << endl;
-            continue;
-        }
-
-        if (!is_valid_hex(addr_str) || !is_valid_hex(value_str)) {
-            cout << "Warning: Skipping invalid hex at line " << line_num << ": " << addr_str << " " << value_str << endl;
-            continue;
-        }
-
-        try {
-            uint32_t addr = stoul(addr_str, nullptr, 16);
-            uint32_t value_inst = stoul(value_str, nullptr, 16);
-            int32_t value = static_cast<int32_t>(value_inst);
-
-            data_memory.emplace_back(addr, value);
-            cout << "Loaded data: " << to_hex(addr) << " -> " << to_hex(value) << endl;
-        } catch (const std::invalid_argument& e) {
-            cout << "Warning: Invalid number format at line " << line_num << ": " << addr_str << " " << value_str << endl;
-            continue;
-        } catch (const std::out_of_range& e) {
-            cout << "Warning: Number out of range at line " << line_num << ": " << addr_str << " " << value_str << endl;
-            continue;
-        }
-    }
-    file.close();
 
     return true;
 }
 
-// Write memory to data.mc
 void write_data_mc(const string& filename) {
     ofstream file(filename);
     if (!file.is_open()) {
@@ -363,1058 +308,829 @@ void write_data_mc(const string& filename) {
     }
 
     for (const auto& mem_pair : data_memory) {
-        uint32_t addr = mem_pair.first;
-        int32_t val = mem_pair.second;
-        file << to_hex(addr) << " " << to_hex(val) << endl;
+        file << to_hex(mem_pair.first) << " " << to_hex(mem_pair.second) << "\n";
     }
     file.close();
-    cout << "Updated data.mc with current memory state\n";
 }
-
-// Hazard detection unit - check for data hazards
 bool detect_data_hazard() {
-    if (!knobs.enable_pipelining) return false;
-    
-    // No hazard if either stage is invalid
-    if (!if_id.is_valid || !id_ex.is_valid) return false;
-    
+    if (!knobs.enable_pipelining || !if_id.is_valid) return false;
+
     uint32_t ir = if_id.ir;
     if (ir == 0) return false;
-    
-    // Extract fields from instruction in decode stage
+
     uint32_t opcode = ir & 0x7F;
-    uint32_t func3 = (ir >> 12) & 0x7;
     uint32_t rs1 = (ir >> 15) & 0x1F;
     uint32_t rs2 = (ir >> 20) & 0x1F;
-    
-    // Check if instruction uses rs1 or rs2 that is being written by instructions in pipeline
-    bool uses_rs1 = (opcode != stoul(U_opcode_map["lui"], nullptr, 2)) && 
-                   (opcode != stoul(UJ_opcode_map["jal"], nullptr, 2));
-    bool uses_rs2 = (opcode == stoul(R_opcode_map["add"], nullptr, 2)) || 
-                   (opcode == stoul(SB_opcode_map["beq"], nullptr, 2)) || 
-                   (opcode == stoul(S_opcode_map["sb"], nullptr, 2));
-    
-    // Check for hazard with instruction in EX stage
-    if (id_ex.ctrl.reg_write && id_ex.rd != 0) {
+
+    bool uses_rs1 = (opcode == stoul(R_opcode_map["add"], nullptr, 2) ||
+                     opcode == stoul(I_opcode_map["addi"], nullptr, 2) ||
+                     opcode == stoul(I_opcode_map["lw"], nullptr, 2) ||
+                     opcode == stoul(I_opcode_map["jalr"], nullptr, 2) ||
+                     opcode == stoul(S_opcode_map["sw"], nullptr, 2) ||
+                     opcode == stoul(SB_opcode_map["beq"], nullptr, 2));
+
+    bool uses_rs2 = (opcode == stoul(R_opcode_map["add"], nullptr, 2) ||
+                     opcode == stoul(S_opcode_map["sw"], nullptr, 2) ||
+                     opcode == stoul(SB_opcode_map["beq"], nullptr, 2));
+
+    // Check hazard with ID/EX
+    if (id_ex.is_valid && id_ex.ctrl.reg_write && id_ex.rd != 0) {
         if ((uses_rs1 && rs1 == id_ex.rd) || (uses_rs2 && rs2 == id_ex.rd)) {
-            if (!knobs.enable_data_forwarding || id_ex.ctrl.mem_read) { // Load-use hazard can't be forwarded
+            if (!knobs.enable_data_forwarding || id_ex.ctrl.mem_read) {
                 stats.data_hazards++;
                 stats.stalls_data_hazards++;
                 return true;
             }
         }
     }
-    
-    // Check for hazard with instruction in MEM stage if forwarding is disabled
-    if (!knobs.enable_data_forwarding && ex_mem.ctrl.reg_write && ex_mem.rd != 0) {
+
+    // Check hazard with EX/MEM
+    if (!knobs.enable_data_forwarding && ex_mem.is_valid && ex_mem.ctrl.reg_write && ex_mem.rd != 0) {
         if ((uses_rs1 && rs1 == ex_mem.rd) || (uses_rs2 && rs2 == ex_mem.rd)) {
             stats.data_hazards++;
             stats.stalls_data_hazards++;
             return true;
         }
     }
-    
+
+    // Check hazard with MEM/WB
+    if (!knobs.enable_data_forwarding && mem_wb.is_valid && mem_wb.ctrl.reg_write && mem_wb.rd != 0) {
+        if ((uses_rs1 && rs1 == mem_wb.rd) || (uses_rs2 && rs2 == mem_wb.rd)) {
+            stats.data_hazards++;
+            stats.stalls_data_hazards++;
+            return true;
+        }
+    }
+
     return false;
 }
+void determine_forwarding(uint32_t& reg_a_val, uint32_t& reg_b_val, uint32_t rs1, uint32_t rs2) {
+    if (!knobs.enable_data_forwarding) return;
 
-// Forward unit - determine forwarding paths
-void determine_forwarding(uint32_t& rs1_val, uint32_t& rs2_val, uint32_t rs1, uint32_t rs2) {
-    if (!knobs.enable_data_forwarding || !knobs.enable_pipelining) return;
-    
-    // Forward from EX/MEM stage
+    // Forward from EX/MEM
     if (ex_mem.is_valid && ex_mem.ctrl.reg_write && ex_mem.rd != 0) {
-        if (rs1 == ex_mem.rd) {
-            rs1_val = ex_mem.alu_result;
-            stats.data_hazards++;
+        if (ex_mem.rd == rs1) {
+            reg_a_val = ex_mem.alu_result;
+            cout << "Forwarding EX/MEM to rs1 (x" << rs1 << "): " << reg_a_val << "\n";
         }
-        if (rs2 == ex_mem.rd) {
-            rs2_val = ex_mem.alu_result;
-            stats.data_hazards++;
+        if (ex_mem.rd == rs2) {
+            reg_b_val = ex_mem.alu_result;
+            cout << "Forwarding EX/MEM to rs2 (x" << rs2 << "): " << reg_b_val << "\n";
         }
     }
-    
-    // Forward from MEM/WB stage (takes precedence over EX/MEM)
+
+    // Forward from MEM/WB
     if (mem_wb.is_valid && mem_wb.ctrl.reg_write && mem_wb.rd != 0) {
-        if (rs1 == mem_wb.rd) {
-            rs1_val = mem_wb.write_data;
-            stats.data_hazards++;
+        if (mem_wb.rd == rs1 && !(ex_mem.is_valid && ex_mem.ctrl.reg_write && ex_mem.rd == rs1)) {
+            reg_a_val = mem_wb.write_data;
+            cout << "Forwarding MEM/WB to rs1 (x" << rs1 << "): " << reg_a_val << "\n";
         }
-        if (rs2 == mem_wb.rd) {
-            rs2_val = mem_wb.write_data;
-            stats.data_hazards++;
+        if (mem_wb.rd == rs2 && !(ex_mem.is_valid && ex_mem.ctrl.reg_write && ex_mem.rd == rs2)) {
+            reg_b_val = mem_wb.write_data;
+            cout << "Forwarding MEM/WB to rs2 (x" << rs2 << "): " << reg_b_val << "\n";
         }
     }
 }
-
-// Fetch stage
 void fetch() {
-    if (program_done) return;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "\n--- Fetch Stage (Cycle " << stats.total_cycles << ") ---\n";
+    if (program_done) {
+        if (!if_id.is_valid && !id_ex.is_valid && !ex_mem.is_valid && !mem_wb.is_valid) {
+            cout << "Fetch: Pipeline empty and program done\n";
+            return;
+        }
     }
 
-    // Check if we should stall due to hazards
     if (stall_pipeline) {
-        if (!knobs.enable_pipelining) {
-            cout << "Pipeline stalled - no fetch\n";
-        }
         stats.stall_count++;
-        return;
+        cout << "Fetch: Stalled, keeping IF/ID unchanged\n";
+        return; // Keep if_id as is, do not advance PC
     }
-    
-    // Get instruction from memory
+
     uint32_t ir = 0;
+    bool found = false;
     for (const auto& instr : text_memory) {
         if (instr.first == pc) {
             ir = instr.second;
+            found = true;
             break;
         }
     }
-    
-    if (ir == 0) {
-        // End of program or invalid PC
-        program_done = true;
-        if (!knobs.enable_pipelining) {
-            cout << "No instruction found at PC=" << to_hex(pc) << " - End of program\n";
+
+    if (!found || ir == 0) {
+        cout << "Fetch: No instruction at PC=" << to_hex(pc) << ", marking IF/ID invalid\n";
+        if_id = IF_ID_Register();
+        pc += 4;
+        if (!if_id.is_valid && !id_ex.is_valid && !ex_mem.is_valid && !mem_wb.is_valid) {
+            cout << "Fetch: Pipeline empty and no more instructions, setting program_done\n";
+            program_done = true;
         }
         return;
     }
 
-    // Use branch prediction for conditional branches
-    uint32_t next_pc = pc + 4;
-    bool predicted_taken = false;
-    
-    // Check if this is a branch instruction
-    uint32_t opcode = ir & 0x7F;
-    if (opcode == stoul(SB_opcode_map["beq"], nullptr, 2) || opcode == stoul(UJ_opcode_map["jal"], nullptr, 2)) {
-        predicted_taken = branch_predictor.predict(pc);
-        if (predicted_taken) {
-            next_pc = branch_predictor.get_target(pc);
-            if (!knobs.enable_pipelining) {
-                cout << "Branch at " << to_hex(pc) << " predicted taken to " << to_hex(next_pc) << endl;
-            }
-        }
-    }
-    
-    // Update IF/ID register
     if_id.pc = pc;
     if_id.ir = ir;
     if_id.is_valid = true;
     if_id.instr_number = ++instruction_count;
-    
-    // Update PC for next cycle
-    pc = flush_pipeline ? branch_target : next_pc;
-    flush_pipeline = false;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "PC: " << to_hex(if_id.pc) << ", IR: " << to_hex(if_id.ir) << endl;
-    }
-}
 
-// Helper function to extract immediate values
+    uint32_t next_pc = pc + 4;
+    bool predicted_taken = branch_predictor->predict(pc);
+    if (predicted_taken) {
+        next_pc = branch_predictor->get_target(pc);
+    }
+
+    pc = next_pc;
+    cout << "Fetch: PC=" << to_hex(if_id.pc) << ", IR=" << to_hex(ir) << ", Instr#=" << instruction_count
+         << ", NextPC=" << to_hex(pc) << ", PredictedTaken=" << predicted_taken << "\n";
+}
 int32_t extract_immediate(uint32_t ir, char type) {
     switch (type) {
-        case 'I': // I-type immediate
-            return static_cast<int32_t>(ir) >> 20;  // auto sign-extends
-        case 'S': { // S-type immediate
+        case 'I': return sign_extend((ir >> 20) & 0xFFF, 12); // imm[11:0]
+        case 'S': {
             int32_t imm_s = ((ir >> 25) << 5) | ((ir >> 7) & 0x1F);
-            if (imm_s & 0x800) imm_s |= 0xFFFFF000;  // manual sign-extend
-            return imm_s;
+            return sign_extend(imm_s, 12);
         }
-        case 'B': { // B-type immediate
+        case 'B': {
             int32_t imm_b = ((ir >> 31) << 12) | (((ir >> 7) & 0x1) << 11) |
-                         (((ir >> 25) & 0x3F) << 5) | (((ir >> 8) & 0xF) << 1);
-            if (imm_b & 0x1000) imm_b |= 0xFFFFE000;  // sign-extend 13 bits
-            return imm_b;
+                            (((ir >> 25) & 0x3F) << 5) | (((ir >> 8) & 0xF) << 1);
+            return sign_extend(imm_b, 13);
         }
-        case 'U': // U-type immediate
-            return ir & 0xFFFFF000;  // already aligned and zero-extended
-        case 'J': { // J-type immediate
-            int32_t imm_j = ((ir >> 31) << 20) | (((ir >> 12) & 0xFF) << 12) |
-                         (((ir >> 20) & 0x1) << 11) | (((ir >> 21) & 0x3FF) << 1);
-            if (imm_j & 0x100000) imm_j |= 0xFFE00000;  // sign-extend 21 bits
-            return imm_j;
+        case 'U': return ir & 0xFFFFF000; // imm[31:12] << 12
+        case 'J': {
+            int32_t imm_j = ((ir >> 31) << 20) | // imm[20]
+                            (((ir >> 21) & 0x3FF) << 1) | // imm[10:1]
+                            (((ir >> 20) & 0x1) << 11) | // imm[11]
+                            (((ir >> 12) & 0xFF) << 12); // imm[19:12]
+            return sign_extend(imm_j, 21);
         }
-        default:
-            return 0;
+        default: return 0;
     }
-}
-
-// Decode stage
-void decode() {
-    if (!if_id.is_valid) return;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "\n--- Decode Stage ---\n";
-    }
-    
-    uint32_t ir = if_id.ir;
-    
-    // Check if we should stall due to hazards
-    if (stall_pipeline) {
-        if (!knobs.enable_pipelining) {
-            cout << "Pipeline stalled - no decode\n";
-        }
+}void decode() {
+    if (!if_id.is_valid) {
+        id_ex = ID_EX_Register();
+        cout << "Decode: IF/ID invalid, inserting bubble\n";
         return;
     }
-    
-    // Extract fields
-    uint32_t opcode = ir & 0x7F;
-    uint32_t rd     = (ir >> 7) & 0x1F;
-    uint32_t func3  = (ir >> 12) & 0x7;
-    uint32_t rs1    = (ir >> 15) & 0x1F;
-    uint32_t rs2    = (ir >> 20) & 0x1F;
-    uint32_t func7  = (ir >> 25) & 0x7F;
-    
-    // Initialize control signals
-    Control ctrl;
-    ctrl.is_nop = false;
-    
-    // Extract immediate values based on instruction format
-    int32_t imm = 0;
-    
-    // Decode using string maps
-    bool valid = false;
-    
-    // R-type
-    if (opcode == stoul(R_opcode_map["add"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        stats.alu_instructions++;
-        
-        if (func3 == stoul(func3_map["add"], nullptr, 2) && func7 == stoul(func7_map["add"], nullptr, 2)) 
-            ctrl.alu_op = "ADD";
-        else if (func3 == stoul(func3_map["sub"], nullptr, 2) && func7 == stoul(func7_map["sub"], nullptr, 2)) 
-            ctrl.alu_op = "SUB";
-        else if (func3 == stoul(func3_map["mul"], nullptr, 2) && func7 == stoul(func7_map["mul"], nullptr, 2)) 
-            ctrl.alu_op = "MUL";
-        else if (func3 == stoul(func3_map["and"], nullptr, 2) && func7 == stoul(func7_map["and"], nullptr, 2)) 
-            ctrl.alu_op = "AND";
-        else if (func3 == stoul(func3_map["or"], nullptr, 2) && func7 == stoul(func7_map["or"], nullptr, 2)) 
-            ctrl.alu_op = "OR";
-        else if (func3 == stoul(func3_map["rem"], nullptr, 2) && func7 == stoul(func7_map["rem"], nullptr, 2)) 
-            ctrl.alu_op = "REM";
-        else if (func3 == stoul(func3_map["sll"], nullptr, 2) && func7 == stoul(func7_map["sll"], nullptr, 2)) 
-            ctrl.alu_op = "SLL";
-        else if (func3 == stoul(func3_map["slt"], nullptr, 2) && func7 == stoul(func7_map["slt"], nullptr, 2)) 
-            ctrl.alu_op = "SLT";
-        else if (func3 == stoul(func3_map["srl"], nullptr, 2) && func7 == stoul(func7_map["srl"], nullptr, 2)) 
-            ctrl.alu_op = "SRL";
-        else if (func3 == stoul(func3_map["sra"], nullptr, 2) && func7 == stoul(func7_map["sra"], nullptr, 2)) 
-            ctrl.alu_op = "SRA";
-        else if (func3 == stoul(func3_map["xor"], nullptr, 2) && func7 == stoul(func7_map["xor"], nullptr, 2)) 
-            ctrl.alu_op = "XOR";
-        else if (func3 == stoul(func3_map["div"], nullptr, 2) && func7 == stoul(func7_map["div"], nullptr, 2)) 
-            ctrl.alu_op = "DIV";
-        else {
-            cout << "Error: Invalid R-type opcode=0x" << hex << opcode 
-                 << " func3=0x" << func3 << " func7=0x" << func7 << endl;
-            valid = false;
-        }
-        valid = true;
-    }
-    // I-type
-    else if (opcode == stoul(I_opcode_map["addi"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        ctrl.use_imm = true;
-        stats.alu_instructions++;
-        
-        if (func3 == stoul(func3_map["addi"], nullptr, 2)) 
-            ctrl.alu_op = "ADD";
-        else if (func3 == stoul(func3_map["andi"], nullptr, 2)) 
-            ctrl.alu_op = "AND";
-        else if (func3 == stoul(func3_map["ori"], nullptr, 2)) 
-            ctrl.alu_op = "OR";
-        else if (func3 == stoul(func3_map["slti"], nullptr, 2)) 
-            ctrl.alu_op = "SLT";
-        else if (func3 == stoul(func3_map["sltiu"], nullptr, 2)) 
-            ctrl.alu_op = "SLTU";
-        else if (func3 == stoul(func3_map["xori"], nullptr, 2)) 
-            ctrl.alu_op = "XOR";
-        else if (func3 == stoul(func3_map["slli"], nullptr, 2) && func7 == stoul(func7_map["slli"], nullptr, 2)) {
-            ctrl.alu_op = "SLLI";
-            imm = (ir >> 20) & 0x1F;
-        } 
-        else if (func3 == stoul(func3_map["srli"], nullptr, 2) && func7 == stoul(func7_map["srli"], nullptr, 2)) {
-            ctrl.alu_op = "SRLI";
-            imm = (ir >> 20) & 0x1F;
-        } 
-        else if (func3 == stoul(func3_map["srli"], nullptr, 2) && func7 == stoul(func7_map["srli"], nullptr, 2)) {
-            ctrl.alu_op = "SRLI";
-            imm = (ir >> 20) & 0x1F;
-        }
-        else if (func3 == stoul(func3_map["srai"], nullptr, 2) && func7 == stoul(func7_map["srai"], nullptr, 2)) {
-            ctrl.alu_op = "SRAI";
-            imm = (ir >> 20) & 0x1F;
-        }
-        else {
-            cout << "Error: Invalid I-type opcode=0x" << hex << opcode << " func3=0x" << func3 << endl;
-            valid = false;
-        }
-        imm = extract_immediate(ir, 'I');
-        valid = true;
-    }
-    // Load instructions
-    else if (opcode == stoul(I_opcode_map["lb"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        ctrl.mem_read = true;
-        ctrl.use_imm = true;
-        ctrl.output_sel = 1; // Memory
-        stats.data_transfer_instructions++;
-        
-        if (func3 == stoul(func3_map["lb"], nullptr, 2)) 
-            ctrl.mem_size = "BYTE";
-        else if (func3 == stoul(func3_map["lh"], nullptr, 2)) 
-            ctrl.mem_size = "HALF";
-        else if (func3 == stoul(func3_map["lw"], nullptr, 2)) 
-            ctrl.mem_size = "WORD";
-        else if (func3 == stoul(func3_map["lbu"], nullptr, 2)) 
-            ctrl.mem_size = "BYTE_U";
-        else if (func3 == stoul(func3_map["lhu"], nullptr, 2)) 
-            ctrl.mem_size = "HALF_U";
-        else {
-            cout << "Error: Invalid load opcode=0x" << hex << opcode << " func3=0x" << func3 << endl;
-            valid = false;
-        }
-        ctrl.alu_op = "ADD";
-        imm = extract_immediate(ir, 'I');
-        valid = true;
-    }
-    // S-type (store)
-    else if (opcode == stoul(S_opcode_map["sb"], nullptr, 2)) {
-        ctrl.mem_write = true;
-        ctrl.use_imm = true;
-        stats.data_transfer_instructions++;
-        
-        if (func3 == stoul(func3_map["sb"], nullptr, 2)) 
-            ctrl.mem_size = "BYTE";
-        else if (func3 == stoul(func3_map["sh"], nullptr, 2)) 
-            ctrl.mem_size = "HALF";
-        else if (func3 == stoul(func3_map["sw"], nullptr, 2)) 
-            ctrl.mem_size = "WORD";
-        else {
-            cout << "Error: Invalid store opcode=0x" << hex << opcode << " func3=0x" << func3 << endl;
-            valid = false;
-        }
-        ctrl.alu_op = "ADD";
-        imm = extract_immediate(ir, 'S');
-        valid = true;
-    }
-    // SB-type (branch)
-    else if (opcode == stoul(SB_opcode_map["beq"], nullptr, 2)) {
-        ctrl.branch = true;
-        ctrl.use_imm = true;
-        stats.control_instructions++;
-        
-        if (func3 == stoul(func3_map["beq"], nullptr, 2)) 
-            ctrl.alu_op = "BEQ";
-        else if (func3 == stoul(func3_map["bne"], nullptr, 2)) 
-            ctrl.alu_op = "BNE";
-        else if (func3 == stoul(func3_map["blt"], nullptr, 2)) 
-            ctrl.alu_op = "BLT";
-        else if (func3 == stoul(func3_map["bge"], nullptr, 2)) 
-            ctrl.alu_op = "BGE";
-        else if (func3 == stoul(func3_map["bltu"], nullptr, 2)) 
-            ctrl.alu_op = "BLTU";
-        else if (func3 == stoul(func3_map["bgeu"], nullptr, 2)) 
-            ctrl.alu_op = "BGEU";
-        else {
-            cout << "Error: Invalid branch opcode=0x" << hex << opcode << " func3=0x" << func3 << endl;
-            valid = false;
-        }
-        imm = extract_immediate(ir, 'B');
-        valid = true;
-    }
-    // U-type (LUI, AUIPC)
-    else if (opcode == stoul(U_opcode_map["lui"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        ctrl.use_imm = true;
-        stats.alu_instructions++;
-        
-        ctrl.alu_op = "LUI";
-        imm = extract_immediate(ir, 'U');
-        valid = true;
-    }
-    else if (opcode == stoul(U_opcode_map["auipc"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        ctrl.use_imm = true;
-        stats.alu_instructions++;
-        
-        ctrl.alu_op = "AUIPC";
-        imm = extract_immediate(ir, 'U');
-        valid = true;
-    }
-    // J-type (JAL)
-    else if (opcode == stoul(UJ_opcode_map["jal"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        ctrl.output_sel = 2; // PC
-        stats.control_instructions++;
-        
-        ctrl.alu_op = "JAL";
-        imm = extract_immediate(ir, 'J');
-        valid = true;
-    }
-    // I-type (JALR)
-    else if (opcode == stoul(I_opcode_map["jalr"], nullptr, 2)) {
-        ctrl.reg_write = true;
-        ctrl.use_imm = true;
-        ctrl.output_sel = 2; // PC
-        stats.control_instructions++;
-        
-        ctrl.alu_op = "JALR";
-        imm = extract_immediate(ir, 'I');
-        valid = true;
-    }
-    // Unknown instruction
-    else {
-        cout << "Error: Unknown opcode: 0x" << hex << opcode << endl;
-        valid = false;
-    }
-    
-    if (!valid) {
-        cout << "Warning: Unsupported instruction at PC=" << to_hex(if_id.pc) << ": " << to_hex(ir) << endl;
-        // Insert a NOP
-        ctrl.is_nop = true;
-    }
-    
-    // Get register values
-    int32_t reg_a_val = (rs1 == 0) ? 0 : reg_file[rs1];
-    int32_t reg_b_val = (rs2 == 0) ? 0 : reg_file[rs2];
 
-    // Update ID/EX Register
+    if (stall_pipeline) {
+        cout << "Decode: Pipeline stalled, keeping ID/EX unchanged\n";
+        return; // Keep id_ex as is
+    }
+
+    // ... existing decode logic ...
+    uint32_t ir = if_id.ir;
+    id_ex.ir = ir;
     id_ex.pc = if_id.pc;
-    id_ex.reg_a_val = reg_a_val;
-    id_ex.reg_b_val = reg_b_val;
-    id_ex.imm = imm;
+    id_ex.instr_number = if_id.instr_number;
+    id_ex.is_valid = true;
+
+    Control& ctrl = id_ex.ctrl;
+    ctrl = Control();
+
+    if (ir == 0) {
+        ctrl.is_nop = true;
+        cout << "Decode: Invalid instruction (IR=0)\n";
+        return;
+    }
+
+    uint32_t opcode = ir & 0x7F;
+    uint32_t rd = (ir >> 7) & 0x1F;
+    uint32_t rs1 = (ir >> 15) & 0x1F;
+    uint32_t rs2 = (ir >> 20) & 0x1F;
+    uint32_t func3 = (ir >> 12) & 0x7;
+    uint32_t func7 = (ir >> 25) & 0x7F;
+    int32_t imm = 0;
+
+    int32_t reg_a_val = reg_file[rs1];
+    int32_t reg_b_val = reg_file[rs2];
+
+    determine_forwarding(reinterpret_cast<uint32_t&>(reg_a_val), reinterpret_cast<uint32_t&>(reg_b_val), rs1, rs2);
+
     id_ex.rs1 = rs1;
     id_ex.rs2 = rs2;
     id_ex.rd = rd;
-    id_ex.ctrl = ctrl;
-    id_ex.is_valid = true;
-    id_ex.instr_number = if_id.instr_number;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "Instruction: " << to_hex(ir) << ", PC: " << to_hex(if_id.pc) << endl;
-        cout << "rs1: x" << rs1 << " = " << reg_a_val << ", rs2: x" << rs2 << " = " << reg_b_val << endl;
-        cout << "rd: x" << rd << ", imm: " << imm << endl;
-        cout << "Control: " << (ctrl.reg_write ? "RegWrite " : "") 
-             << (ctrl.mem_read ? "MemRead " : "") 
-             << (ctrl.mem_write ? "MemWrite " : "")
-             << (ctrl.branch ? "Branch " : "")
-             << "ALU=" << ctrl.alu_op << endl;
-    }
-}
+    id_ex.reg_a_val = reg_a_val;
+    id_ex.reg_b_val = reg_b_val;
 
-// Execute stage
-void execute() {
-    if (!id_ex.is_valid) return;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "\n--- Execute Stage ---\n";
-    }
-    
-    // Apply forwarding
-   uint32_t reg_a_val = id_ex.reg_a_val;
-    uint32_t reg_b_val = id_ex.reg_b_val;
-    determine_forwarding(reg_a_val, reg_b_val, id_ex.rs1, id_ex.rs2);
-    
-    int32_t alu_result = 0;
+    cout << "Decode: PC=" << to_hex(if_id.pc) << ", IR=" << to_hex(ir) << ", rs1=x" << rs1
+         << "(" << reg_a_val << "), rs2=x" << rs2 << "(" << reg_b_val << "), rd=x" << rd << "\n";
+
+    bool is_control = false;
     bool branch_taken = false;
-    
-    // Check for NOP
-    if (id_ex.ctrl.is_nop) {
-        if (!knobs.enable_pipelining) {
-            cout << "NOP instruction" << endl;
-        }
-        goto alu_done;
-    }
-    
-    // ALU operation
-    if (id_ex.ctrl.alu_op == "ADD") {
-        alu_result = reg_a_val + (id_ex.ctrl.use_imm ? id_ex.imm : reg_b_val);
-    } 
-    else if (id_ex.ctrl.alu_op == "SUB") {
-        alu_result = reg_a_val - reg_b_val;
-    }
-    else if (id_ex.ctrl.alu_op == "MUL") {
-        alu_result = reg_a_val * reg_b_val;
-    }
-    else if (id_ex.ctrl.alu_op == "DIV") {
-        if (reg_b_val == 0) {
-            cout << "Error: Division by zero at PC=" << to_hex(id_ex.pc) << endl;
-            alu_result = 0;
+    uint32_t branch_target = if_id.pc + 4;
+
+    if (opcode == stoul(R_opcode_map["add"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        stats.alu_instructions++;
+        if (func3 == stoul(func3_map["add"], nullptr, 2) && func7 == stoul(func7_map["add"], nullptr, 2)) {
+            ctrl.alu_op = "ADD";
+        } else if (func3 == stoul(func3_map["sub"], nullptr, 2) && func7 == stoul(func7_map["sub"], nullptr, 2)) {
+            ctrl.alu_op = "SUB";
+        } else if (func3 == stoul(func3_map["mul"], nullptr, 2) && func7 == stoul(func7_map["mul"], nullptr, 2)) {
+            ctrl.alu_op = "MUL";
+        } else if (func3 == stoul(func3_map["sll"], nullptr, 2) && func7 == stoul(func7_map["sll"], nullptr, 2)) {
+            ctrl.alu_op = "SLL";
+        } else if (func3 == stoul(func3_map["slt"], nullptr, 2) && func7 == stoul(func7_map["slt"], nullptr, 2)) {
+            ctrl.alu_op = "SLT";
+        } else if (func3 == stoul(func3_map["sltu"], nullptr, 2) && func7 == stoul(func7_map["sltu"], nullptr, 2)) {
+            ctrl.alu_op = "SLTU";
+        } else if (func3 == stoul(func3_map["xor"], nullptr, 2) && func7 == stoul(func7_map["xor"], nullptr, 2)) {
+            ctrl.alu_op = "XOR";
+        } else if (func3 == stoul(func3_map["srl"], nullptr, 2) && func7 == stoul(func7_map["srl"], nullptr, 2)) {
+            ctrl.alu_op = "SRL";
+        } else if (func3 == stoul(func3_map["sra"], nullptr, 2) && func7 == stoul(func7_map["sra"], nullptr, 2)) {
+            ctrl.alu_op = "SRA";
+        } else if (func3 == stoul(func3_map["or"], nullptr, 2) && func7 == stoul(func7_map["or"], nullptr, 2)) {
+            ctrl.alu_op = "OR";
+        } else if (func3 == stoul(func3_map["and"], nullptr, 2) && func7 == stoul(func7_map["and"], nullptr, 2)) {
+            ctrl.alu_op = "AND";
         } else {
-            alu_result = reg_a_val / reg_b_val;
+            ctrl.is_nop = true;
+            cout << "Decode: Unknown R-type instruction, func3=0x" << hex << func3 << ", func7=0x" << func7 << dec << "\n";
         }
-    }
-    else if (id_ex.ctrl.alu_op == "REM") {
-        if (reg_b_val == 0) {
-            cout << "Error: Remainder by zero at PC=" << to_hex(id_ex.pc) << endl;
-            alu_result = 0;
+    } else if (opcode == stoul(I_opcode_map["addi"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        ctrl.use_imm = true;
+        imm = sign_extend((ir >> 20) & 0xFFF, 12);
+        stats.alu_instructions++;
+        if (func3 == stoul(func3_map["addi"], nullptr, 2)) {
+            ctrl.alu_op = "ADDI";
+        } else if (func3 == stoul(func3_map["slti"], nullptr, 2)) {
+            ctrl.alu_op = "SLTI";
+        } else if (func3 == stoul(func3_map["sltiu"], nullptr, 2)) {
+            ctrl.alu_op = "SLTIU";
+        } else if (func3 == stoul(func3_map["xori"], nullptr, 2)) {
+            ctrl.alu_op = "XORI";
+        } else if (func3 == stoul(func3_map["ori"], nullptr, 2)) {
+            ctrl.alu_op = "ORI";
+        } else if (func3 == stoul(func3_map["andi"], nullptr, 2)) {
+            ctrl.alu_op = "ANDI";
+        } else if (func3 == stoul(func3_map["slli"], nullptr, 2) && func7 == stoul(func7_map["slli"], nullptr, 2)) {
+            ctrl.alu_op = "SLLI";
+            imm = (ir >> 20) & 0x1F;
+        } else if (func3 == stoul(func3_map["srli"], nullptr, 2) && func7 == stoul(func7_map["srli"], nullptr, 2)) {
+            ctrl.alu_op = "SRLI";
+            imm = (ir >> 20) & 0x1F;
+        } else if (func3 == stoul(func3_map["srai"], nullptr, 2) && func7 == stoul(func7_map["srai"], nullptr, 2)) {
+            ctrl.alu_op = "SRAI";
+            imm = (ir >> 20) & 0x1F;
         } else {
-            alu_result = reg_a_val % reg_b_val;
+            ctrl.is_nop = true;
+            cout << "Decode: Unknown I-type arithmetic instruction, func3=0x" << hex << func3 << ", func7=0x" << func7 << dec << "\n";
         }
-    }
-    else if (id_ex.ctrl.alu_op == "AND") {
-        alu_result = reg_a_val & (id_ex.ctrl.use_imm ? id_ex.imm : reg_b_val);
-    }
-    else if (id_ex.ctrl.alu_op == "OR") {
-        alu_result = reg_a_val | (id_ex.ctrl.use_imm ? id_ex.imm : reg_b_val);
-    }
-    else if (id_ex.ctrl.alu_op == "XOR") {
-        alu_result = reg_a_val ^ (id_ex.ctrl.use_imm ? id_ex.imm : reg_b_val);
-    }
-    else if (id_ex.ctrl.alu_op == "SLT") {
-        alu_result = (reg_a_val < (id_ex.ctrl.use_imm ? id_ex.imm : reg_b_val)) ? 1 : 0;
-    }
-    else if (id_ex.ctrl.alu_op == "SLTU") {
-        alu_result = (static_cast<uint32_t>(reg_a_val) < 
-                      static_cast<uint32_t>(id_ex.ctrl.use_imm ? id_ex.imm : reg_b_val)) ? 1 : 0;
-    }
-    else if (id_ex.ctrl.alu_op == "SLL") {
-        alu_result = reg_a_val << (id_ex.ctrl.use_imm ? (id_ex.imm & 0x1F) : (reg_b_val & 0x1F));
-    }
-    else if (id_ex.ctrl.alu_op == "SRL") {
-        alu_result = static_cast<uint32_t>(reg_a_val) >> (id_ex.ctrl.use_imm ? (id_ex.imm & 0x1F) : (reg_b_val & 0x1F));
-    }
-    else if (id_ex.ctrl.alu_op == "SRA") {
-        alu_result = reg_a_val >> (id_ex.ctrl.use_imm ? (id_ex.imm & 0x1F) : (reg_b_val & 0x1F));
-    }
-    else if (id_ex.ctrl.alu_op == "SLLI") {
-        alu_result = reg_a_val << (id_ex.imm & 0x1F);
-    }
-    else if (id_ex.ctrl.alu_op == "SRLI") {
-        alu_result = static_cast<uint32_t>(reg_a_val) >> (id_ex.imm & 0x1F);
-    }
-    else if (id_ex.ctrl.alu_op == "SRAI") {
-        alu_result = reg_a_val >> (id_ex.imm & 0x1F);
-    }
-    else if (id_ex.ctrl.alu_op == "LUI") {
-        alu_result = id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "AUIPC") {
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "JAL") {
-        alu_result = id_ex.pc + id_ex.imm;
+    } else if (opcode == stoul(I_opcode_map["lw"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        ctrl.mem_read = true;
+        ctrl.use_imm = true;
+        ctrl.output_sel = 1;
+        imm = sign_extend((ir >> 20) & 0xFFF, 12);
+        stats.data_transfer_instructions++;
+        if (func3 == stoul(func3_map["lb"], nullptr, 2)) {
+            ctrl.alu_op = "LB";
+            ctrl.mem_size = "BYTE";
+        } else if (func3 == stoul(func3_map["lh"], nullptr, 2)) {
+            ctrl.alu_op = "LH";
+            ctrl.mem_size = "HALF";
+        } else if (func3 == stoul(func3_map["lw"], nullptr, 2)) {
+            ctrl.alu_op = "LW";
+            ctrl.mem_size = "WORD";
+        } else if (func3 == stoul(func3_map["lbu"], nullptr, 2)) {
+            ctrl.alu_op = "LBU";
+            ctrl.mem_size = "BYTE_U";
+        } else if (func3 == stoul(func3_map["lhu"], nullptr, 2)) {
+            ctrl.alu_op = "LHU";
+            ctrl.mem_size = "HALF_U";
+        } else {
+            ctrl.is_nop = true;
+            cout << "Decode: Unknown load instruction, func3=0x" << hex << func3 << dec << "\n";
+        }
+    } else if (opcode == stoul(S_opcode_map["sw"], nullptr, 2)) {
+        ctrl.mem_write = true;
+        ctrl.reg_write = false;
+        imm = extract_immediate(ir, 'S');
+        stats.data_transfer_instructions++;
+        if (func3 == stoul(func3_map["sb"], nullptr, 2)) {
+            ctrl.alu_op = "SB";
+            ctrl.mem_size = "BYTE";
+        } else if (func3 == stoul(func3_map["sh"], nullptr, 2)) {
+            ctrl.alu_op = "SH";
+            ctrl.mem_size = "HALF";
+        } else if (func3 == stoul(func3_map["sw"], nullptr, 2)) {
+            ctrl.alu_op = "SW";
+            ctrl.mem_size = "WORD";
+        } else {
+            ctrl.is_nop = true;
+            cout << "Decode: Unknown store instruction, func3=0x" << hex << func3 << dec << "\n";
+        }
+    } else if (opcode == stoul(SB_opcode_map["beq"], nullptr, 2)) {
+        ctrl.branch = true;
+        ctrl.reg_write = false;
+        id_ex.rd = 0;
+        is_control = true;
+        stats.control_instructions++;
+        imm = extract_immediate(ir, 'B');
+        if (func3 == stoul(func3_map["beq"], nullptr, 2)) {
+            ctrl.alu_op = "BEQ";
+            branch_taken = (reg_a_val == reg_b_val);
+        } else if (func3 == stoul(func3_map["bne"], nullptr, 2)) {
+            ctrl.alu_op = "BNE";
+            branch_taken = (reg_a_val != reg_b_val);
+        } else if (func3 == stoul(func3_map["blt"], nullptr, 2)) {
+            ctrl.alu_op = "BLT";
+            branch_taken = (static_cast<int32_t>(reg_a_val) < static_cast<int32_t>(reg_b_val));
+        } else if (func3 == stoul(func3_map["bge"], nullptr, 2)) {
+            ctrl.alu_op = "BGE";
+            branch_taken = (static_cast<int32_t>(reg_a_val) >= static_cast<int32_t>(reg_b_val));
+        } else if (func3 == stoul(func3_map["bltu"], nullptr, 2)) {
+            ctrl.alu_op = "BLTU";
+            branch_taken = (static_cast<uint32_t>(reg_a_val) < static_cast<uint32_t>(reg_b_val));
+        } else if (func3 == stoul(func3_map["bgeu"], nullptr, 2)) {
+            ctrl.alu_op = "BGEU";
+            branch_taken = (static_cast<uint32_t>(reg_a_val) >= static_cast<uint32_t>(reg_b_val));
+        } else {
+            ctrl.is_nop = true;
+            cout << "Decode: Unknown SB-type instruction, func3=0x" << hex << func3 << dec << "\n";
+            return;
+        }
+        branch_target = branch_taken ? if_id.pc + imm : if_id.pc + 4;
+        cout << "Decode " << ctrl.alu_op << ": rs1=x" << rs1 << "(" << reg_a_val << "), rs2=x" << rs2
+             << "(" << reg_b_val << "), Taken=" << branch_taken << ", Target=" << to_hex(branch_target) << "\n";
+    } else if (opcode == stoul(UJ_opcode_map["jal"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        ctrl.alu_op = "JAL";
+        ctrl.output_sel = 2;
+        is_control = true;
+        stats.control_instructions++;
+        imm = extract_immediate(ir, 'J');
         branch_taken = true;
-    }
-    else if (id_ex.ctrl.alu_op == "JALR") {
-        alu_result = (reg_a_val + id_ex.imm) & ~1;  // Clear least significant bit
+        branch_target = if_id.pc + imm;
+        cout << "Decode JAL: rd=x" << rd << ", Target=" << to_hex(branch_target) << "\n";
+    } else if (opcode == stoul(I_opcode_map["jalr"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        ctrl.alu_op = "JALR";
+        ctrl.use_imm = true;
+        ctrl.output_sel = 2;
+        is_control = true;
+        stats.control_instructions++;
+        imm = sign_extend((ir >> 20) & 0xFFF, 12);
         branch_taken = true;
+        branch_target = (reg_a_val + imm) & ~1;
+        cout << "Decode JALR: rs1=x" << rs1 << "(" << reg_a_val << "), imm=" << imm
+             << ", Target=" << to_hex(branch_target) << "\n";
+    } else if (opcode == stoul(U_opcode_map["lui"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        ctrl.alu_op = "LUI";
+        imm = extract_immediate(ir, 'U');
+        stats.alu_instructions++;
+        cout << "Decode LUI: rd=x" << rd << ", imm=" << to_hex(imm) << "\n";
+    } else if (opcode == stoul(U_opcode_map["auipc"], nullptr, 2)) {
+        ctrl.reg_write = true;
+        ctrl.alu_op = "AUIPC";
+        imm = extract_immediate(ir, 'U');
+        stats.alu_instructions++;
+        cout << "Decode AUIPC: rd=x" << rd << ", imm=" << to_hex(imm) << "\n";
+    } else {
+        ctrl.is_nop = true;
+        cout << "Decode: Unknown opcode: 0x" << hex << opcode << dec << "\n";
     }
-    // Branch operations
-    else if (id_ex.ctrl.alu_op == "BEQ") {
-        branch_taken = (reg_a_val == reg_b_val);
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "BNE") {
-        branch_taken = (reg_a_val != reg_b_val);
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "BLT") {
-        branch_taken = (reg_a_val < reg_b_val);
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "BGE") {
-        branch_taken = (reg_a_val >= reg_b_val);
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "BLTU") {
-        branch_taken = (static_cast<uint32_t>(reg_a_val) < static_cast<uint32_t>(reg_b_val));
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else if (id_ex.ctrl.alu_op == "BGEU") {
-        branch_taken = (static_cast<uint32_t>(reg_a_val) >= static_cast<uint32_t>(reg_b_val));
-        alu_result = id_ex.pc + id_ex.imm;
-    }
-    else {
-        cout << "Error: Unknown ALU operation: " << id_ex.ctrl.alu_op << endl;
-    }
-    
-alu_done:
-    // Handle branch misprediction
-    if (id_ex.ctrl.branch || id_ex.ctrl.alu_op == "JAL" || id_ex.ctrl.alu_op == "JALR") {
-        // Get the predicted target from branch predictor
-        bool predicted_taken = branch_predictor.predict(id_ex.pc);
-        uint32_t predicted_target = predicted_taken ? branch_predictor.get_target(id_ex.pc) : id_ex.pc + 4;
-        
-        // Check if prediction was correct
-        if ((branch_taken && !predicted_taken) || (!branch_taken && predicted_taken) || 
-            (branch_taken && predicted_taken && alu_result != predicted_target)) {
-            // Misprediction
-            if (!knobs.enable_pipelining) {
-                cout << "Branch misprediction at PC=" << to_hex(id_ex.pc) 
-                     << " actual=" << (branch_taken ? "taken" : "not taken") 
-                     << " predicted=" << (predicted_taken ? "taken" : "not taken") << endl;
-            }
-            
-            // Flush pipeline
-            flush_pipeline = true;
-            branch_target = branch_taken ? alu_result : id_ex.pc + 4;
+
+    id_ex.imm = imm;
+
+    if (is_control) {
+        uint32_t current_pc = if_id.pc;
+        bool predicted_taken = branch_predictor->predict(if_id.pc);
+        uint32_t predicted_target = predicted_taken ? branch_predictor->get_target(if_id.pc) : if_id.pc + 4;
+
+        if (branch_taken != predicted_taken || (branch_taken && branch_target != predicted_target)) {
+            cout << "Misprediction: Flushing pipeline, ActualTarget=" << to_hex(branch_target)
+                 << ", PredictedTarget=" << to_hex(predicted_target) << "\n";
+            pc = branch_target;
+            if_id = IF_ID_Register();
+            stall_pipeline = true;
             stats.branch_mispredictions++;
             stats.control_hazards++;
             stats.stalls_control_hazards++;
+        } else {
+            cout << "Prediction correct: Taken=" << branch_taken << ", Target=" << to_hex(branch_target) << "\n";
         }
-        
-        // Update branch predictor
-        branch_predictor.update(id_ex.pc, branch_taken, alu_result);
+
+        branch_predictor->update(current_pc, branch_taken, branch_target);
     }
-    
-    // Special case for JAL/JALR: save return address
-    if (id_ex.ctrl.alu_op == "JAL" || id_ex.ctrl.alu_op == "JALR") {
-        ex_mem.alu_result = id_ex.pc + 4;  // Return address is PC+4
+}void execute() {
+    if (!id_ex.is_valid) {
+        ex_mem = EX_MEM_Register();
+        cout << "Execute: ID/EX invalid, skipping\n";
+        return;
+    }
+
+    cout << "Execute: PC=" << to_hex(id_ex.pc) << ", IR=" << to_hex(id_ex.ir) << ", ALU=" << id_ex.ctrl.alu_op << "\n";
+
+    int32_t reg_a_val = id_ex.reg_a_val;
+    int32_t reg_b_val = id_ex.reg_b_val;
+    determine_forwarding(reinterpret_cast<uint32_t&>(reg_a_val), reinterpret_cast<uint32_t&>(reg_b_val), id_ex.rs1, id_ex.rs2);
+
+    int32_t alu_result = 0;
+
+    if (id_ex.ctrl.is_nop) {
+        cout << "Execute: NOP\n";
+        goto alu_done;
+    }
+
+    if (id_ex.ctrl.alu_op == "ADD") {
+        alu_result = reg_a_val + reg_b_val;
+    } else if (id_ex.ctrl.alu_op == "SUB") {
+        alu_result = reg_a_val - reg_b_val;
+    } else if (id_ex.ctrl.alu_op == "MUL") {
+        alu_result = reg_a_val * reg_b_val;
+    } else if (id_ex.ctrl.alu_op == "SLL") {
+        alu_result = reg_a_val << (reg_b_val & 0x1F);
+    } else if (id_ex.ctrl.alu_op == "SLT") {
+        alu_result = (reg_a_val < reg_b_val) ? 1 : 0;
+    } else if (id_ex.ctrl.alu_op == "SLTU") {
+        alu_result = (static_cast<uint32_t>(reg_a_val) < static_cast<uint32_t>(reg_b_val)) ? 1 : 0;
+    } else if (id_ex.ctrl.alu_op == "XOR") {
+        alu_result = reg_a_val ^ reg_b_val;
+    } else if (id_ex.ctrl.alu_op == "SRL") {
+        alu_result = static_cast<uint32_t>(reg_a_val) >> (reg_b_val & 0x1F);
+    } else if (id_ex.ctrl.alu_op == "SRA") {
+        alu_result = reg_a_val >> (reg_b_val & 0x1F);
+    } else if (id_ex.ctrl.alu_op == "OR") {
+        alu_result = reg_a_val | reg_b_val;
+    } else if (id_ex.ctrl.alu_op == "AND") {
+        alu_result = reg_a_val & reg_b_val;
+    } else if (id_ex.ctrl.alu_op == "ADDI" || id_ex.ctrl.alu_op == "LW" || id_ex.ctrl.alu_op == "LH" ||
+               id_ex.ctrl.alu_op == "LB" || id_ex.ctrl.alu_op == "LHU" || id_ex.ctrl.alu_op == "LBU" ||
+               id_ex.ctrl.alu_op == "SW" || id_ex.ctrl.alu_op == "SH" || id_ex.ctrl.alu_op == "SB" ||
+               id_ex.ctrl.alu_op == "JALR") {
+        alu_result = reg_a_val + id_ex.imm;
+    } else if (id_ex.ctrl.alu_op == "SLTI") {
+        alu_result = (reg_a_val < id_ex.imm) ? 1 : 0;
+    } else if (id_ex.ctrl.alu_op == "SLTIU") {
+        alu_result = (static_cast<uint32_t>(reg_a_val) < static_cast<uint32_t>(id_ex.imm)) ? 1 : 0;
+    } else if (id_ex.ctrl.alu_op == "XORI") {
+        alu_result = reg_a_val ^ id_ex.imm;
+    } else if (id_ex.ctrl.alu_op == "ORI") {
+        alu_result = reg_a_val | id_ex.imm;
+    } else if (id_ex.ctrl.alu_op == "ANDI") {
+        alu_result = reg_a_val & id_ex.imm;
+    } else if (id_ex.ctrl.alu_op == "SLLI") {
+        alu_result = reg_a_val << (id_ex.imm & 0x1F);
+    } else if (id_ex.ctrl.alu_op == "SRLI") {
+        alu_result = static_cast<uint32_t>(reg_a_val) >> (id_ex.imm & 0x1F);
+    } else if (id_ex.ctrl.alu_op == "SRAI") {
+        alu_result = reg_a_val >> (id_ex.imm & 0x1F);
+    } else if (id_ex.ctrl.alu_op == "BEQ" || id_ex.ctrl.alu_op == "BNE" || id_ex.ctrl.alu_op == "BLT" ||
+               id_ex.ctrl.alu_op == "BGE" || id_ex.ctrl.alu_op == "BLTU" || id_ex.ctrl.alu_op == "BGEU") {
+        alu_result = id_ex.pc + id_ex.imm;
+    } else if (id_ex.ctrl.alu_op == "JAL" || id_ex.ctrl.alu_op == "JALR") {
+        alu_result = id_ex.pc + 4;
+    } else if (id_ex.ctrl.alu_op == "LUI") {
+        alu_result = id_ex.imm;
+    } else if (id_ex.ctrl.alu_op == "AUIPC") {
+        alu_result = id_ex.pc + id_ex.imm;
     } else {
-        ex_mem.alu_result = alu_result;
+        cout << "Execute: Unknown ALU op: " << id_ex.ctrl.alu_op << "\n";
     }
-    
-    // Update EX/MEM register
+    alu_done:
     ex_mem.pc = id_ex.pc;
-    ex_mem.rs2_val = reg_b_val;  // For store instructions
+    ex_mem.alu_result = alu_result;
+    ex_mem.rs2_val = reg_b_val;
     ex_mem.rd = id_ex.rd;
     ex_mem.ctrl = id_ex.ctrl;
     ex_mem.is_valid = true;
     ex_mem.instr_number = id_ex.instr_number;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "ALU Result: " << alu_result << " (0x" << hex << alu_result << dec << ")" << endl;
-        if (id_ex.ctrl.branch) {
-            cout << "Branch " << (branch_taken ? "taken" : "not taken") << endl;
-        }
-    }
-}
 
-// Memory stage
+    id_ex = ID_EX_Register();
+}
 void memory() {
-    if (!ex_mem.is_valid) return;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "\n--- Memory Stage ---\n";
+    if (!ex_mem.is_valid) {
+        mem_wb = MEM_WB_Register();
+        cout << "Memory: EX/MEM invalid, skipping\n";
+        return;
     }
-    
+
     int32_t mem_result = ex_mem.alu_result;
-    
-    // Memory operations
+
     if (ex_mem.ctrl.mem_read) {
         uint32_t addr = ex_mem.alu_result;
-        
-        // Find data in memory
+        // Alignment checks
+        if (ex_mem.ctrl.mem_size == "WORD" && (addr % 4 != 0)) {
+            cout << "Warning: Misaligned WORD read at address " << to_hex(addr) << "\n";
+        } else if (ex_mem.ctrl.mem_size == "HALF" || ex_mem.ctrl.mem_size == "HALF_U") {
+            if (addr % 2 != 0) {
+                cout << "Warning: Misaligned HALF read at address " << to_hex(addr) << "\n";
+            }
+        }
         bool found = false;
         for (const auto& mem_entry : data_memory) {
             if (mem_entry.first == addr) {
                 mem_result = mem_entry.second;
                 found = true;
-                
-                // Handle different sizes
                 if (ex_mem.ctrl.mem_size == "BYTE") {
-                    mem_result = (mem_result & 0xFF);
-                    if (mem_result & 0x80) mem_result |= 0xFFFFFF00;  // Sign extend
-                } 
-                else if (ex_mem.ctrl.mem_size == "HALF") {
-                    mem_result = (mem_result & 0xFFFF);
-                    if (mem_result & 0x8000) mem_result |= 0xFFFF0000;  // Sign extend
+                    mem_result = sign_extend(mem_result & 0xFF, 8);
+                } else if (ex_mem.ctrl.mem_size == "HALF") {
+                    mem_result = sign_extend(mem_result & 0xFFFF, 16);
+                } else if (ex_mem.ctrl.mem_size == "BYTE_U") {
+                    mem_result = mem_result & 0xFF;
+                } else if (ex_mem.ctrl.mem_size == "HALF_U") {
+                    mem_result = mem_result & 0xFFFF;
                 }
-                else if (ex_mem.ctrl.mem_size == "BYTE_U") {
-                    mem_result = (mem_result & 0xFF);  // Zero extend
-                }
-                else if (ex_mem.ctrl.mem_size == "HALF_U") {
-                    mem_result = (mem_result & 0xFFFF);  // Zero extend
-                }
-                // WORD uses the full 32-bit value
-                
                 break;
             }
         }
-        
         if (!found) {
-            cout << "Warning: Memory read at address " << to_hex(addr) << " found no data, returning 0" << endl;
+            cout << "Warning: Memory read at address " << to_hex(addr) << " found no data, returning 0\n";
             mem_result = 0;
         }
-        
-        if (!knobs.enable_pipelining) {
-            cout << "Memory Read: Address=" << to_hex(addr) << " Data=" << to_hex(mem_result) << endl;
-        }
-    }
-    else if (ex_mem.ctrl.mem_write) {
+    } else if (ex_mem.ctrl.mem_write) {
         uint32_t addr = ex_mem.alu_result;
         int32_t value = ex_mem.rs2_val;
-        
-        // Handle different sizes
-        if (ex_mem.ctrl.mem_size == "BYTE") {
-            // Find existing memory location
-            bool found = false;
-            for (auto& mem_entry : data_memory) {
-                if (mem_entry.first == addr) {
-                    // Update only the lowest byte
+        // Alignment checks
+        if (ex_mem.ctrl.mem_size == "WORD" && (addr % 4 != 0)) {
+            cout << "Warning: Misaligned WORD write at address " << to_hex(addr) << "\n";
+        } else if (ex_mem.ctrl.mem_size == "HALF" && (addr % 2 != 0)) {
+            cout << "Warning: Misaligned HALF write at address " << to_hex(addr) << "\n";
+        }
+        bool found = false;
+        for (auto& mem_entry : data_memory) {
+            if (mem_entry.first == addr) {
+                if (ex_mem.ctrl.mem_size == "BYTE") {
                     mem_entry.second = (mem_entry.second & ~0xFF) | (value & 0xFF);
-                    found = true;
-                    break;
-                }
-            }
-            
-            if (!found) {
-                // Create new memory entry with only the byte set
-                data_memory.emplace_back(addr, value & 0xFF);
-            }
-        }
-        else if (ex_mem.ctrl.mem_size == "HALF") {
-            // Find existing memory location
-            bool found = false;
-            for (auto& mem_entry : data_memory) {
-                if (mem_entry.first == addr) {
-                    // Update only the lowest half-word
+                } else if (ex_mem.ctrl.mem_size == "HALF") {
                     mem_entry.second = (mem_entry.second & ~0xFFFF) | (value & 0xFFFF);
-                    found = true;
-                    break;
+                } else {
+                    mem_entry.second = value;
                 }
-            }
-            
-            if (!found) {
-                // Create new memory entry with only the half-word set
-                data_memory.emplace_back(addr, value & 0xFFFF);
+                found = true;
+                break;
             }
         }
-        else { // WORD - full 32-bit
-            // Find existing memory location
-            bool found = false;
-            for (auto& mem_entry : data_memory) {
-                if (mem_entry.first == addr) {
-                    mem_entry.second = value;
-                    found = true;
-                    break;
-                }
-            }
-            
-            if (!found) {
-                // Create new memory entry
+        if (!found) {
+            if (ex_mem.ctrl.mem_size == "BYTE") {
+                data_memory.emplace_back(addr, value & 0xFF);
+            } else if (ex_mem.ctrl.mem_size == "HALF") {
+                data_memory.emplace_back(addr, value & 0xFFFF);
+            } else {
                 data_memory.emplace_back(addr, value);
             }
         }
-        
-        if (!knobs.enable_pipelining) {
-            cout << "Memory Write: Address=" << to_hex(addr) << " Data=" << to_hex(value) << endl;
-        }
     }
-    
-    // Update MEM/WB register
+
     mem_wb.pc = ex_mem.pc;
     mem_wb.write_data = ex_mem.ctrl.output_sel == 1 ? mem_result : ex_mem.alu_result;
     mem_wb.rd = ex_mem.rd;
     mem_wb.ctrl = ex_mem.ctrl;
     mem_wb.is_valid = true;
     mem_wb.instr_number = ex_mem.instr_number;
-}
 
-// Writeback stage
+    ex_mem = EX_MEM_Register();
+    cout << "Memory: PC=" << to_hex(mem_wb.pc) << ", Instr#=" << mem_wb.instr_number << "\n";
+}
 void writeback() {
-    if (!mem_wb.is_valid) return;
-    
-    if (!knobs.enable_pipelining) {
-        cout << "\n--- Writeback Stage ---\n";
+    if (!mem_wb.is_valid) {
+        cout << "Writeback: MEM/WB invalid, skipping\n";
+        return;
     }
-    
-    // Register write
+
+    if (!mem_wb.ctrl.is_nop) {
+        stats.total_instructions++; // Count only non-NOP instructions
+        cout << "Total Instructions are :  " << stats.total_instructions << endl;
+    }
+
     if (mem_wb.ctrl.reg_write && mem_wb.rd != 0) {
-        if (mem_wb.ctrl.output_sel == 2) {  // PC+4 for JAL/JALR
+        if (mem_wb.ctrl.output_sel == 2) {
             reg_file[mem_wb.rd] = mem_wb.pc + 4;
-            
-            if (!knobs.enable_pipelining) {
-                cout << "Register Write: x" << mem_wb.rd << " = " << to_hex(mem_wb.pc + 4) << " (PC+4)" << endl;
-            }
         } else {
             reg_file[mem_wb.rd] = mem_wb.write_data;
-            
-            if (!knobs.enable_pipelining) {
-                cout << "Register Write: x" << mem_wb.rd << " = " << mem_wb.write_data 
-                     << " (0x" << hex << mem_wb.write_data << dec << ")" << endl;
-            }
         }
+        cout << "Writeback: x" << mem_wb.rd << " = " << to_hex(mem_wb.write_data) << "\n";
     }
-    
-    // Update statistics
-    stats.total_instructions++;
+
+    cout << "Writeback: PC=" << to_hex(mem_wb.pc) << ", Instr#=" << mem_wb.instr_number << "\n";
+    mem_wb = MEM_WB_Register();
 }
 
-// Print the state of all registers (for debugging)
 void print_register_file() {
-    cout << "\n--- Register File ---\n";
+    if (!knobs.print_reg_file) return;
+    cout << "\nRegister File:\n";
     for (int i = 0; i < 32; i++) {
-        if (i % 4 == 0 && i > 0) cout << endl;
-        cout << "x" << setw(2) << setfill('0') << i << ": " << setw(10) << setfill(' ') 
+        if (i % 4 == 0 && i > 0) cout << "\n";
+        cout << "x" << setw(2) << setfill('0') << i << ": " << setw(10) << setfill(' ')
              << reg_file[i] << " (0x" << hex << setw(8) << setfill('0') << reg_file[i] << dec << ")  ";
     }
-    cout << endl;
+    cout << "\n";
 }
 
-// Print the state of pipeline registers
 void print_pipeline_registers() {
-    cout << "\n--- Pipeline Registers ---\n";
-    
-    cout << "IF/ID: ";
-    if (if_id.is_valid) {
-        cout << "PC=" << to_hex(if_id.pc) << ", IR=" << to_hex(if_id.ir) << ", INSTR#=" << if_id.instr_number << endl;
-    } else {
-        cout << "INVALID" << endl;
-    }
-    
+    if (!knobs.print_pipeline_regs) return;
+    cout << "\nPipeline Registers:\n";
+    cout << "IF/ID: " << (if_id.is_valid ? "PC=" + to_hex(if_id.pc) + ", IR=" + to_hex(if_id.ir) +
+                                  ", Instr#=" + to_string(if_id.instr_number) : "INVALID") << "\n";
     cout << "ID/EX: ";
     if (id_ex.is_valid) {
-        cout << "PC=" << to_hex(id_ex.pc) << ", rs1=" << id_ex.rs1 << "(" << id_ex.reg_a_val << "), "
-             << "rs2=" << id_ex.rs2 << "(" << id_ex.reg_b_val << "), "
-             << "rd=" << id_ex.rd << ", imm=" << id_ex.imm << ", "
-             << "ctrl=" << id_ex.ctrl.alu_op << ", INSTR#=" << id_ex.instr_number << endl;
+        cout << "PC=" << to_hex(id_ex.pc) << ", rs1=x" << id_ex.rs1 << "(" << id_ex.reg_a_val
+             << "), rs2=x" << id_ex.rs2 << "(" << id_ex.reg_b_val << "), rd=x" << id_ex.rd
+             << ", imm=" << id_ex.imm << ", ALU=" << id_ex.ctrl.alu_op << ", Instr#=" << id_ex.instr_number;
     } else {
-        cout << "INVALID" << endl;
+        cout << "INVALID";
     }
-    
+    cout << "\n";
     cout << "EX/MEM: ";
     if (ex_mem.is_valid) {
-        cout << "PC=" << to_hex(ex_mem.pc) << ", ALU=" << ex_mem.alu_result << ", "
-             << "rs2_val=" << ex_mem.rs2_val << ", rd=" << ex_mem.rd << ", "
-             << "ctrl=" << (ex_mem.ctrl.mem_read ? "MemRead " : "") 
-             << (ex_mem.ctrl.mem_write ? "MemWrite " : "") 
-             << (ex_mem.ctrl.reg_write ? "RegWrite " : "")
-             << "INSTR#=" << ex_mem.instr_number << endl;
+        cout << "PC=" << to_hex(ex_mem.pc) << ", ALU=" << ex_mem.alu_result << ", rs2_val=" << ex_mem.rs2_val
+             << ", rd=x" << ex_mem.rd << ", Ctrl=" << (ex_mem.ctrl.mem_read ? "MemRead " : "")
+             << (ex_mem.ctrl.mem_write ? "MemWrite " : "") << (ex_mem.ctrl.reg_write ? "RegWrite " : "")
+             << "Instr#=" << ex_mem.instr_number;
     } else {
-        cout << "INVALID" << endl;
+        cout << "INVALID";
     }
-    
+    cout << "\n";
     cout << "MEM/WB: ";
     if (mem_wb.is_valid) {
-        cout << "PC=" << to_hex(mem_wb.pc) << ", WData=" << mem_wb.write_data << ", "
-             << "rd=" << mem_wb.rd << ", "
-             << "ctrl=" << (mem_wb.ctrl.reg_write ? "RegWrite " : "")
-             << "INSTR#=" << mem_wb.instr_number << endl;
+        cout << "PC=" << to_hex(mem_wb.pc) << ", WData=" << mem_wb.write_data << ", rd=x" << mem_wb.rd
+             << ", Ctrl=" << (mem_wb.ctrl.reg_write ? "RegWrite " : "") << "Instr#=" << mem_wb.instr_number;
     } else {
-        cout << "INVALID" << endl;
+        cout << "INVALID";
     }
+    cout << "\n";
 }
 
-// Trace specific instruction through the pipeline
 void trace_instruction(int instr_number) {
+    if (instr_number == -1) return;
     if (if_id.is_valid && if_id.instr_number == instr_number) {
-        cout << "Instruction #" << instr_number << " is in IF/ID stage: PC=" << to_hex(if_id.pc) << endl;
+        cout << "Trace: Instr#" << instr_number << " in IF/ID, PC=" << to_hex(if_id.pc) << "\n";
     }
-    
     if (id_ex.is_valid && id_ex.instr_number == instr_number) {
-        cout << "Instruction #" << instr_number << " is in ID/EX stage: PC=" << to_hex(id_ex.pc) 
-             << ", ALU=" << id_ex.ctrl.alu_op << endl;
+        cout << "Trace: Instr#" << instr_number << " in ID/EX, PC=" << to_hex(id_ex.pc)
+             << ", ALU=" << id_ex.ctrl.alu_op << "\n";
     }
-    
     if (ex_mem.is_valid && ex_mem.instr_number == instr_number) {
-        cout << "Instruction #" << instr_number << " is in EX/MEM stage: PC=" << to_hex(ex_mem.pc)
-             << ", ALU Result=" << ex_mem.alu_result << endl;
+        cout << "Trace: Instr#" << instr_number << " in EX/MEM, PC=" << to_hex(ex_mem.pc)
+             << ", ALU Result=" << ex_mem.alu_result << "\n";
     }
-    
     if (mem_wb.is_valid && mem_wb.instr_number == instr_number) {
-        cout << "Instruction #" << instr_number << " is in MEM/WB stage: PC=" << to_hex(mem_wb.pc)
-             << ", Data=" << mem_wb.write_data << endl;
+        cout << "Trace: Instr#" << instr_number << " in MEM/WB, PC=" << to_hex(mem_wb.pc)
+             << ", Data=" << mem_wb.write_data << "\n";
     }
 }
 
-// Print statistics
 void print_statistics() {
-    cout << "\n--- Simulation Statistics ---\n";
-    cout << "Total Cycles: " << stats.total_cycles << endl;
-    cout << "Total Instructions: " << stats.total_instructions << endl;
-    cout << "CPI: " << fixed << setprecision(3) << stats.get_cpi() << endl;
-    cout << "Data Transfer Instructions: " << stats.data_transfer_instructions << endl;
-    cout << "ALU Instructions: " << stats.alu_instructions << endl;
-    cout << "Control Instructions: " << stats.control_instructions << endl;
-    cout << "Total Stalls/Bubbles: " << stats.stall_count << endl;
-    cout << "Data Hazards: " << stats.data_hazards << endl;
-    cout << "Control Hazards: " << stats.control_hazards << endl;
-    cout << "Branch Mispredictions: " << stats.branch_mispredictions << endl;
-    cout << "Stalls Due to Data Hazards: " << stats.stalls_data_hazards << endl;
-    cout << "Stalls Due to Control Hazards: " << stats.stalls_control_hazards << endl;
+    cout << "\nSimulation Statistics:\n";
+    cout << "Total Cycles: " << stats.total_cycles << "\n";
+    cout << "Total Instructions: " << stats.total_instructions << "\n";
+    cout << "CPI: " << fixed << setprecision(3) << stats.get_cpi() << "\n";
+    cout << "Data Transfer Instructions: " << stats.data_transfer_instructions << "\n";
+    cout << "ALU Instructions: " << stats.alu_instructions << "\n";
+    cout << "Control Instructions: " << stats.control_instructions << "\n";
+    cout << "Total Stalls/Bubbles: " << stats.stall_count << "\n";
+    cout << "Data Hazards: " << stats.data_hazards << "\n";
+    cout << "Control Hazards: " << stats.control_hazards << "\n";
+    cout << "Branch Mispredictions: " << stats.branch_mispredictions << "\n";
+    cout << "Stalls Due to Data Hazards: " << stats.stalls_data_hazards << "\n";
+    cout << "Stalls Due to Control Hazards: " << stats.stalls_control_hazards << "\n";
 }
+void configure_knobs() {
+    // Set knob values here (change these to control the simulator)
+    knobs.enable_pipelining = true;          // Knob1: Enable pipelining
+    knobs.enable_data_forwarding = true;     // Knob2: Enable data forwarding
+    knobs.print_reg_file = true;             // Knob3: Print register file each cycle
+    knobs.print_pipeline_regs = true;        // Knob4: Print pipeline registers each cycle
+    knobs.trace_instruction = -1;            // Knob5: Trace specific instruction (-1 to disable, e.g., 10 for 10th instruction)
+    knobs.print_branch_predictor = true;     // Knob6: Print branch predictor state each cycle
 
-// Parse and process command-line options
-void process_options(int argc, char* argv[], string& text_file, string& data_file) {
-    text_file = "text.mc";  // Default text file
-    data_file = "data.mc";  // Default data file
-    
-    for (int i = 1; i < argc; i++) {
-        string arg = argv[i];
-        
-        if (arg == "-t" || arg == "--text") {
-            if (i + 1 < argc) {
-                text_file = argv[++i];
-            } else {
-                cerr << "Error: Text file path missing after " << arg << endl;
-                exit(1);
-            }
-        } else if (arg == "-d" || arg == "--data") {
-            if (i + 1 < argc) {
-                data_file = argv[++i];
-            } else {
-                cerr << "Error: Data file path missing after " << arg << endl;
-                exit(1);
-            }
-        } else if (arg == "-p" || arg == "--pipelining") {
-            knobs.enable_pipelining = true;
-            cout << "Pipelining enabled" << endl;
-        } else if (arg == "-f" || arg == "--forwarding") {
-            knobs.enable_data_forwarding = true;
-            cout << "Data forwarding enabled" << endl;
-        } else if (arg == "-v" || arg == "--verbose") {
-            knobs.enable_verbose = true;
-            cout << "Verbose output enabled" << endl;
-        } else if (arg == "-h" || arg == "--help") {
-            cout << "Usage: " << argv[0] << " [options]" << endl;
-            cout << "Options:" << endl;
-            cout << "  -t, --text FILE      Specify text segment file (default: text.mc)" << endl;
-            cout << "  -d, --data FILE      Specify data segment file (default: data.mc)" << endl;
-            cout << "  -p, --pipelining     Enable pipelining" << endl;
-            cout << "  -f, --forwarding     Enable data forwarding" << endl;
-            cout << "  -v, --verbose        Show detailed execution trace" << endl;
-            cout << "  -h, --help           Display this help message" << endl;
-            exit(0);
-        } else {
-            cerr << "Unknown option: " << arg << endl;
-            cerr << "Use --help for usage information" << endl;
-            exit(1);
-        }
+    // Print knob settings for clarity
+    cout << "Knob settings:\n";
+    cout << "  Pipelining: " << (knobs.enable_pipelining ? "Enabled" : "Disabled") << "\n";
+    cout << "  Data Forwarding: " << (knobs.enable_data_forwarding ? "Enabled" : "Disabled") << "\n";
+    cout << "  Print Register File: " << (knobs.print_reg_file ? "Enabled" : "Disabled") << "\n";
+    cout << "  Print Pipeline Registers: " << (knobs.print_pipeline_regs ? "Enabled" : "Disabled") << "\n";
+    cout << "  Trace Instruction: " << (knobs.trace_instruction >= 0 ? to_string(knobs.trace_instruction) : "Disabled") << "\n";
+    cout << "  Print Branch Predictor: " << (knobs.print_branch_predictor ? "Enabled" : "Disabled") << "\n";
+}
+void initialize_simulator() {
+    text_memory.clear();
+    data_memory.clear();
+    reg_file.fill(0);
+    reg_file[2] = 0x7FFFFFE4;
+    reg_file[3] = 0x10000000;
+    reg_file[10] = 0x00000001;
+    reg_file[11] = 0x07FFFFE4;
+
+    pc = 0;
+    if_id = IF_ID_Register();
+    id_ex = ID_EX_Register();
+    ex_mem = EX_MEM_Register();
+    mem_wb = MEM_WB_Register();
+
+    stall_pipeline = false;
+
+    stats = Stats();
+    instruction_count = 0;
+    program_done = false;
+
+    // Initialize branch predictor
+    if (branch_predictor != nullptr) {
+        delete branch_predictor;
     }
-    
-    cout << "Using text file: " << text_file << endl;
-    cout << "Using data file: " << data_file << endl;
-}
-
-// Main simulation cycle
-void run_simulation() {
-    // Initialize simulation
+    branch_predictor = new BranchPredictor(16); // BTB size = 16
+    cout << "Simulator initialized, BTB cleared\n";
+}void run_simulation() {
     stats.total_cycles = 0;
     stats.total_instructions = 0;
     program_done = false;
     stall_pipeline = false;
-    flush_pipeline = false;
-    
-    cout << "Starting simulation..." << endl;
-    
-    // Main simulation loop
-    while (!program_done || id_ex.is_valid || ex_mem.is_valid || mem_wb.is_valid) {
-        if (knobs.enable_verbose) {
-            cout << "\n==== Cycle " << stats.total_cycles + 1 << " ====" << endl;
-            print_pipeline_registers();
-        }
-        
-        // Check for data hazards
-        stall_pipeline = detect_data_hazard();
-        
-        // Pipeline stages in reverse order to avoid structural hazards
-        writeback();  // WB stage
-        memory();     // MEM stage
-        execute();    // EX stage
-        decode();     // ID stage
-        fetch();      // IF stage
-        
-        // Update cycle count
-        stats.total_cycles++;
-        
-        // Handle pipeline flushes for control instructions
-        if (flush_pipeline) {
-            if_id.is_valid = false;
-            id_ex.is_valid = false;
-        }
-        
-        // Shift pipeline for single-cycle execution
-        if (!knobs.enable_pipelining) {
-            if_id.is_valid = false;
-            id_ex.is_valid = false;
-            ex_mem.is_valid = false;
-            mem_wb.is_valid = false;
-        }
-        
-        if (knobs.enable_verbose) {
-            print_register_file();
-        }
-    }
-    
-    // Final stats
-    print_statistics();
-}
-// Initialize the simulator
-void initialize_simulator() {
-    // Clear memory
-    text_memory.clear();
-    data_memory.clear();
-    
-    // Clear registers
-    for (int i = 0; i < 32; i++) {
-        reg_file[i] = 0;
-    }
-    
-    // Initialize PC and pipeline registers
-    pc = 0;
-    if_id.is_valid = false;
-    id_ex.is_valid = false;
-    ex_mem.is_valid = false;
-    mem_wb.is_valid = false;
-    
-    // Reset statistics
-    stats = Stats();
-    instruction_count = 0;
-    
-    // Initialize control flags
-    program_done = false;
-    stall_pipeline = false;
-    flush_pipeline = false;
-    branch_target = 0;
-}
 
-// Load memory content from files
-bool load_memory(const string& text_file, const string& data_file) {
-    // Load text segment
-    ifstream text_in(text_file);
-    if (!text_in) {
-        cerr << "Error: Cannot open text file: " << text_file << endl;
-        return false;
-    }
-    
-    uint32_t addr, instr;
-    while (text_in >> hex >> addr >> instr) {
-        text_memory.emplace_back(addr, instr);
-        if (knobs.enable_verbose) {
-            cout << "Loaded instruction: " << to_hex(addr) << " = " << to_hex(instr) << endl;
-        }
-    }
-    text_in.close();
-    
-    // Load data segment if provided
-    ifstream data_in(data_file);
-    if (data_in) {
-        while (data_in >> hex >> addr >> instr) {
-            data_memory.emplace_back(addr, instr);
-            if (knobs.enable_verbose) {
-                cout << "Loaded data: " << to_hex(addr) << " = " << to_hex(instr) << endl;
+    cout << "Starting simulation...\n";
+    cout << "Pipelining: " << (knobs.enable_pipelining ? "Enabled" : "Disabled") << "\n";
+
+    if (knobs.enable_pipelining) {
+        while (stats.total_cycles < MAX_CYCLES &&
+               (!program_done || if_id.is_valid || id_ex.is_valid || ex_mem.is_valid || mem_wb.is_valid)) {
+            cout << "\n=== Cycle " << stats.total_cycles + 1 << " ===\n";
+
+            // Check for data hazards if not already stalling
+            if (!stall_pipeline) {
+                stall_pipeline = detect_data_hazard();
             }
+
+            writeback();
+            memory();
+            execute();
+            decode();
+            fetch();
+
+            // Clear stall if no hazards remain
+            if (stall_pipeline && !detect_data_hazard()) {
+                stall_pipeline = false;
+            }
+
+            stats.total_cycles++;
+
+            print_pipeline_registers();
+            print_register_file();
+            trace_instruction(knobs.trace_instruction);
+            branch_predictor->print_state();
         }
-        data_in.close();
     } else {
-        cout << "No data file found or could not open: " << data_file << endl;
+        // Non-pipelined execution
+        while (stats.total_cycles < MAX_CYCLES && !program_done) {
+            cout << "\n=== Cycle " << stats.total_cycles + 1 << " ===\n";
+
+            fetch();
+            if (!if_id.is_valid) {
+                stats.total_cycles++;
+                continue;
+            }
+
+            decode();
+            if (!id_ex.is_valid) {
+                stats.total_cycles++;
+                continue;
+            }
+
+            execute();
+            if (!ex_mem.is_valid) {
+                stats.total_cycles++;
+                continue;
+            }
+
+            memory();
+            if (!mem_wb.is_valid) {
+                stats.total_cycles++;
+                continue;
+            }
+
+            writeback();
+
+            stats.total_cycles++;
+
+            print_pipeline_registers();
+            print_register_file();
+            trace_instruction(knobs.trace_instruction);
+            branch_predictor->print_state();
+        }
     }
-    
-    return true;
+
+    print_statistics();
+    write_data_mc("data.mc");
 }
+int main() {
+    string text_file = "text.mc";
+    string data_file = "data.mc";
 
+    // Configure knobs
+    configure_knobs();
 
-// Main function
-int main(int argc, char* argv[]) {
-    // Process command line options
-    string text_file, data_file;
-    process_options(argc, argv, text_file, data_file);
-    
-    // Initialize simulator state
     initialize_simulator();
-    
-    // Load memory from files
+
     if (!load_memory(text_file, data_file)) {
+        cerr << "Failed to load memory\n";
         return 1;
     }
-    
-    // Run simulation
+
     run_simulation();
-    
+
+    // Clean up branch predictor
+    delete branch_predictor;
+    branch_predictor = nullptr;
+
     return 0;
 }

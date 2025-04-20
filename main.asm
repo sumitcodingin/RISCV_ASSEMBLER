@@ -1,6 +1,6 @@
   .text 
    
-    addi x5, x0, 4
+    addi x5, x0, 2
     addi x6, x0, 1
 fact_loop:
     beq x5, x0, fact_end
