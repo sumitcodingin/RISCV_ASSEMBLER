@@ -13,6 +13,7 @@
 #include "Instructions_Func.h"
 #include "Auxiliary_Functions.h"
 
+
 // Function to sign-extend a value
 int32_t sign_extend(uint32_t value, int bits) {
     int32_t mask = 1 << (bits - 1);
@@ -34,6 +35,7 @@ struct Knobs {
     bool print_pipeline_regs = false;
     int trace_instruction = -1;
     bool print_branch_predictor = false;
+    bool enable_structural_hazard = false;
 } knobs;
 
 // Statistics
@@ -126,66 +128,84 @@ MEM_WB_Register mem_wb;
 
 // Hazard/stall controls
 bool stall_pipeline = false;
-
 class BranchPredictor {
-    private:
-        struct BTBEntry {
-            uint32_t pc;
-            uint32_t target;
-            bool valid;
-            bool prediction; // 1-bit predictor: 0 (not taken), 1 (taken)
-        };
-        vector<BTBEntry> btb;
-        uint32_t btb_size;
-    
-    public:
-        BranchPredictor(uint32_t btb_s) : btb_size(btb_s) {
-            btb.resize(btb_size, {0, 0, false, false}); // Initialize: invalid, predict not taken
-        }
-    
-        bool predict(uint32_t pc) {
-            uint32_t index = (pc >> 2) % btb_size;
-            if (btb[index].valid && btb[index].pc == pc) {
-                bool predicted_taken = btb[index].prediction;
+private:
+    struct BTBEntry {
+        uint32_t pc;
+        uint32_t target;
+        bool valid;
+        bool prediction; // 1-bit predictor: 0 (not taken), 1 (taken)
+    };
+    vector<BTBEntry> btb; // No fixed size, grows dynamically
+
+public:
+    BranchPredictor(uint32_t btb_s) {
+        btb.clear(); // Initialize empty
+        cout << "Branch Predictor initialized with dynamic size\n";
+    }
+
+    bool predict(uint32_t pc) {
+        for (const auto& entry : btb) {
+            if (entry.valid && entry.pc == pc) {
+                bool predicted_taken = entry.prediction;
                 cout << "Predict: PC=" << to_hex(pc) << ", BTB hit, Prediction=" << predicted_taken << "\n";
                 return predicted_taken;
             }
-            cout << "Predict: PC=" << to_hex(pc) << ", No BTB entry, predict not taken\n";
-            return false; // Default: predict not taken
         }
-    
-        uint32_t get_target(uint32_t pc) {
-            uint32_t index = (pc >> 2) % btb_size;
-            if (btb[index].valid && btb[index].pc == pc) {
-                return btb[index].target;
+        cout << "Predict: PC=" << to_hex(pc) << ", No BTB entry, predict not taken\n";
+        return false; // Default: predict not taken
+    }
+
+    uint32_t get_target(uint32_t pc) {
+        for (const auto& entry : btb) {
+            if (entry.valid && entry.pc == pc) {
+                return entry.target;
             }
-            return pc + 4; // Default: next instruction
         }
-    
-        void update(uint32_t pc, bool taken, uint32_t target) {
-            uint32_t index = (pc >> 2) % btb_size;
-            // Store all control instructions in BTB
-            btb[index].pc = pc;
-            btb[index].target = target;
-            btb[index].valid = true;
-            btb[index].prediction = taken; // 1-bit predictor: set to actual outcome
-            cout << "BTB Update: PC=" << to_hex(pc) << ", Taken=" << taken 
-                 << ", Target=" << to_hex(target) << ", Prediction=" << btb[index].prediction << "\n";
-        }
-    
-        void print_state() {
-            if (!knobs.print_branch_predictor) return;
-            cout << "Branch Predictor State:\n";
-            for (uint32_t i = 0; i < btb_size; i++) {
-                if (btb[i].valid) {
-                    cout << "BTB[" << i << "]: PC=" << to_hex(btb[i].pc) 
-                         << ", Target=" << to_hex(btb[i].target) 
-                         << ", Prediction=" << btb[i].prediction << "\n";
+        return pc + 4; // Default: next instruction
+    }
+
+    void update(uint32_t pc, bool taken, uint32_t target) {
+        // Check if entry exists
+        for (auto& entry : btb) {
+            if (entry.valid && entry.pc == pc) {
+                // Skip if no change
+                if (entry.target == target && entry.prediction == taken) {
+                    cout << "BTB Update: PC=" << to_hex(pc) << ", No change (Target=" << to_hex(target)
+                         << ", Prediction=" << taken << ")\n";
+                    return;
                 }
+                // Update existing entry
+                entry.target = target;
+                entry.prediction = taken;
+                cout << "BTB Update: PC=" << to_hex(pc) << ", Taken=" << taken
+                     << ", Target=" << to_hex(target) << ", Prediction=" << taken << "\n";
+                return;
             }
         }
-    };
-// Global branch predictor instance
+        // Add new entry
+        btb.push_back({pc, target, true, taken});
+        cout << "BTB Update: New entry PC=" << to_hex(pc) << ", Taken=" << taken
+             << ", Target=" << to_hex(target) << ", Prediction=" << taken << "\n";
+    }
+
+    void print_state() {
+        if (!knobs.print_branch_predictor) return;
+        cout << "Branch Predictor State:\n";
+        if (btb.empty()) {
+            cout << "BTB is empty\n";
+            return;
+        }
+        for (size_t i = 0; i < btb.size(); ++i) {
+            if (btb[i].valid) {
+                cout << "BTB[" << i << "]: PC=" << to_hex(btb[i].pc)
+                     << ", Target=" << to_hex(btb[i].target)
+                     << ", Prediction=" << btb[i].prediction << "\n";
+            }
+        }
+    }
+};
+
 BranchPredictor* branch_predictor = nullptr;
 
 bool is_valid_hex(const string& str) {
@@ -353,8 +373,9 @@ bool detect_data_hazard() {
         }
     }
 
-    // Check hazard with MEM/WB
-    if (!knobs.enable_data_forwarding && mem_wb.is_valid && mem_wb.ctrl.reg_write && mem_wb.rd != 0) {
+    // Check hazard with MEM/WB (skipped if structural hazard handling is enabled)
+    if (!knobs.enable_data_forwarding && !knobs.enable_structural_hazard &&
+        mem_wb.is_valid && mem_wb.ctrl.reg_write && mem_wb.rd != 0) {
         if ((uses_rs1 && rs1 == mem_wb.rd) || (uses_rs2 && rs2 == mem_wb.rd)) {
             stats.data_hazards++;
             stats.stalls_data_hazards++;
@@ -399,7 +420,7 @@ void fetch() {
         }
     }
 
-    if (stall_pipeline) {
+    if (stall_pipeline && knobs.enable_pipelining) {
         stats.stall_count++;
         cout << "Fetch: Stalled, keeping IF/ID unchanged\n";
         return; // Keep if_id as is, do not advance PC
@@ -432,14 +453,16 @@ void fetch() {
     if_id.instr_number = ++instruction_count;
 
     uint32_t next_pc = pc + 4;
-    bool predicted_taken = branch_predictor->predict(pc);
-    if (predicted_taken) {
-        next_pc = branch_predictor->get_target(pc);
-    }
+    if (knobs.enable_pipelining) {
+        bool predicted_taken = branch_predictor->predict(pc);
+        if (predicted_taken) {
+            next_pc = branch_predictor->get_target(pc);
+        }
+    } // In non-pipelined mode, always assume next_pc = pc + 4
 
     pc = next_pc;
     cout << "Fetch: PC=" << to_hex(if_id.pc) << ", IR=" << to_hex(ir) << ", Instr#=" << instruction_count
-         << ", NextPC=" << to_hex(pc) << ", PredictedTaken=" << predicted_taken << "\n";
+         << ", NextPC=" << to_hex(pc) << "\n";
 }
 int32_t extract_immediate(uint32_t ir, char type) {
     switch (type) {
@@ -696,6 +719,7 @@ int32_t extract_immediate(uint32_t ir, char type) {
 
     if (is_control) {
         uint32_t current_pc = if_id.pc;
+        if(knobs.enable_pipelining){
         bool predicted_taken = branch_predictor->predict(if_id.pc);
         uint32_t predicted_target = predicted_taken ? branch_predictor->get_target(if_id.pc) : if_id.pc + 4;
 
@@ -714,7 +738,14 @@ int32_t extract_immediate(uint32_t ir, char type) {
 
         branch_predictor->update(current_pc, branch_taken, branch_target);
     }
-}void execute() {
+    else{
+        // Non pipelined mode
+        pc = branch_target;
+        if_id = IF_ID_Register();
+        branch_predictor->update(current_pc , branch_taken , branch_target);
+        cout << "NON pipelined : Setting PC to " << to_hex(branch_target) << ", Taken" << branch_taken << endl;
+    }
+}}void execute() {
     if (!id_ex.is_valid) {
         ex_mem = EX_MEM_Register();
         cout << "Execute: ID/EX invalid, skipping\n";
@@ -954,24 +985,64 @@ void print_pipeline_registers() {
 }
 
 void trace_instruction(int instr_number) {
-    if (instr_number == -1) return;
+    if (instr_number == -1) return; // Tracing disabled
+
+    cout << "\nTracing Instruction #" << instr_number << ":\n";
+
+    // IF/ID Stage
     if (if_id.is_valid && if_id.instr_number == instr_number) {
-        cout << "Trace: Instr#" << instr_number << " in IF/ID, PC=" << to_hex(if_id.pc) << "\n";
+        cout << "IF/ID: PC=" << to_hex(if_id.pc) << ", IR=" << to_hex(if_id.ir)
+             << ", Instr#=" << if_id.instr_number << "\n";
+    } else if (if_id.instr_number == instr_number) {
+        cout << "IF/ID: INVALID (Instruction #" << instr_number << " was here but is now invalid)\n";
     }
+
+    // ID/EX Stage
     if (id_ex.is_valid && id_ex.instr_number == instr_number) {
-        cout << "Trace: Instr#" << instr_number << " in ID/EX, PC=" << to_hex(id_ex.pc)
-             << ", ALU=" << id_ex.ctrl.alu_op << "\n";
+        cout << "ID/EX: PC=" << to_hex(id_ex.pc) << ", IR=" << to_hex(id_ex.ir)
+             << ", rs1=x" << id_ex.rs1 << "(" << id_ex.reg_a_val << ")"
+             << ", rs2=x" << id_ex.rs2 << "(" << id_ex.reg_b_val << ")"
+             << ", rd=x" << id_ex.rd << ", imm=" << id_ex.imm
+             << ", ALU=" << id_ex.ctrl.alu_op
+             << ", Ctrl=" << (id_ex.ctrl.reg_write ? "RegWrite " : "")
+             << (id_ex.ctrl.mem_read ? "MemRead " : "")
+             << (id_ex.ctrl.mem_write ? "MemWrite " : "")
+             << (id_ex.ctrl.branch ? "Branch " : "")
+             << (id_ex.ctrl.use_imm ? "UseImm " : "")
+             << ", Instr#=" << id_ex.instr_number << "\n";
+    } else if (id_ex.instr_number == instr_number) {
+        cout << "ID/EX: INVALID (Instruction #" << instr_number << " was here but is now invalid)\n";
     }
+
+    // EX/MEM Stage
     if (ex_mem.is_valid && ex_mem.instr_number == instr_number) {
-        cout << "Trace: Instr#" << instr_number << " in EX/MEM, PC=" << to_hex(ex_mem.pc)
-             << ", ALU Result=" << ex_mem.alu_result << "\n";
+        cout << "EX/MEM: PC=" << to_hex(ex_mem.pc) << ", IR=" << to_hex(id_ex.ir) // Note: IR not stored in EX/MEM, using ID/EX if needed
+             << ", ALU Result=" << ex_mem.alu_result << ", rs2_val=" << ex_mem.rs2_val
+             << ", rd=x" << ex_mem.rd
+             << ", Ctrl=" << (ex_mem.ctrl.reg_write ? "RegWrite " : "")
+             << (ex_mem.ctrl.mem_read ? "MemRead " : "")
+             << (ex_mem.ctrl.mem_write ? "MemWrite " : "")
+             << (ex_mem.ctrl.branch ? "Branch " : "")
+             << (ex_mem.ctrl.use_imm ? "UseImm " : "")
+             << ", Instr#=" << ex_mem.instr_number << "\n";
+    } else if (ex_mem.instr_number == instr_number) {
+        cout << "EX/MEM: INVALID (Instruction #" << instr_number << " was here but is now invalid)\n";
     }
+
+    // MEM/WB Stage
     if (mem_wb.is_valid && mem_wb.instr_number == instr_number) {
-        cout << "Trace: Instr#" << instr_number << " in MEM/WB, PC=" << to_hex(mem_wb.pc)
-             << ", Data=" << mem_wb.write_data << "\n";
+        cout << "MEM/WB: PC=" << to_hex(mem_wb.pc) << ", IR=" << to_hex(id_ex.ir) // Note: IR not stored in MEM/WB
+             << ", Write Data=" << mem_wb.write_data << ", rd=x" << mem_wb.rd
+             << ", Ctrl=" << (mem_wb.ctrl.reg_write ? "RegWrite " : "")
+             << (mem_wb.ctrl.mem_read ? "MemRead " : "")
+             << (mem_wb.ctrl.mem_write ? "MemWrite " : "")
+             << (mem_wb.ctrl.branch ? "Branch " : "")
+             << (mem_wb.ctrl.use_imm ? "UseImm " : "")
+             << ", Instr#=" << mem_wb.instr_number << "\n";
+    } else if (mem_wb.instr_number == instr_number) {
+        cout << "MEM/WB: INVALID (Instruction #" << instr_number << " was here but is now invalid)\n";
     }
 }
-
 void print_statistics() {
     cout << "\nSimulation Statistics:\n";
     cout << "Total Cycles: " << stats.total_cycles << "\n";
@@ -990,9 +1061,11 @@ void print_statistics() {
 void configure_knobs() {
     // Set knob values here (change these to control the simulator)
     knobs.enable_pipelining = true;          // Knob1: Enable pipelining
-    knobs.enable_data_forwarding = true;     // Knob2: Enable data forwarding
+    knobs.enable_data_forwarding = false;     // Knob2: Enable data forwarding
     knobs.print_reg_file = true;             // Knob3: Print register file each cycle
     knobs.print_pipeline_regs = true;        // Knob4: Print pipeline registers each cycle
+    knobs.enable_structural_hazard = false;   
+
     knobs.trace_instruction = -1;            // Knob5: Trace specific instruction (-1 to disable, e.g., 10 for 10th instruction)
     knobs.print_branch_predictor = true;     // Knob6: Print branch predictor state each cycle
 
@@ -1002,6 +1075,7 @@ void configure_knobs() {
     cout << "  Data Forwarding: " << (knobs.enable_data_forwarding ? "Enabled" : "Disabled") << "\n";
     cout << "  Print Register File: " << (knobs.print_reg_file ? "Enabled" : "Disabled") << "\n";
     cout << "  Print Pipeline Registers: " << (knobs.print_pipeline_regs ? "Enabled" : "Disabled") << "\n";
+     cout << "  Structural Hazard Handling: " << (knobs.enable_structural_hazard ? "Enabled" : "Disabled") << "\n";
     cout << "  Trace Instruction: " << (knobs.trace_instruction >= 0 ? to_string(knobs.trace_instruction) : "Disabled") << "\n";
     cout << "  Print Branch Predictor: " << (knobs.print_branch_predictor ? "Enabled" : "Disabled") << "\n";
 }
@@ -1065,7 +1139,7 @@ void initialize_simulator() {
             stats.total_cycles++;
 
             print_pipeline_registers();
-            print_register_file();
+            //print_register_file();
             trace_instruction(knobs.trace_instruction);
             branch_predictor->print_state();
         }
